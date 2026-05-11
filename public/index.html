@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Smoothio</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body, #root { width: 100%; height: 100%; overflow: hidden; background: #141414; }
+  </style>
+  <script>
+    // Minimal CSInterface wrapper using __adobe_cep__ native binding
+    (function () {
+      if (typeof __adobe_cep__ === 'undefined') return;
+      function CSInterface() {}
+      CSInterface.prototype.evalScript = function (script, callback) {
+        __adobe_cep__.evalScript(script, callback || function () {});
+      };
+      window.CSInterface = CSInterface;
+    })();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+</body>
+</html>

@@ -1,0 +1,113 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { CurveData, Preset } from '../types';
+import { buildSvgPath, getAnchorPoints } from '../utils/curveUtils';
+
+interface Props {
+  preset: Preset;
+  size: number;
+  onClick: () => void;
+  onDelete: () => void;
+  isAltHeld: boolean;
+}
+
+export const PresetCard: React.FC<Props> = ({ preset, size, onClick, onDelete, isAltHeld }) => {
+  const [hovered, setHovered] = useState(false);
+
+  const w = size;
+  const h = size;
+  const pad = 8;
+
+  const toSvg = (p: { x: number; y: number }) => ({
+    x: pad + p.x * (w - 2 * pad),
+    y: h - pad - p.y * (h - 2 * pad),
+  });
+
+  const pathD = buildSvgPath(preset.curve, toSvg);
+
+  const handleClick = () => {
+    if (isAltHeld && hovered) {
+      onDelete();
+    } else {
+      onClick();
+    }
+  };
+
+  return (
+    <div
+      onClick={handleClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        cursor: isAltHeld ? 'pointer' : 'pointer',
+        padding: '4px 2px',
+        borderRadius: 4,
+        background: hovered && !isAltHeld ? 'rgba(255,255,255,0.05)' : 'transparent',
+        transition: 'background 0.1s',
+        position: 'relative',
+        width: size + 8,
+      }}
+    >
+      <div
+        style={{
+          width: w,
+          height: h,
+          background: '#111',
+          border: '1px solid #2a2a2a',
+          borderRadius: 3,
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+      >
+        <svg width={w} height={h} style={{ display: 'block' }}>
+          {/* Grid */}
+          {[0.25, 0.5, 0.75].map(t => (
+            <g key={t}>
+              <line x1={pad + t * (w - 2 * pad)} y1={pad}
+                x2={pad + t * (w - 2 * pad)} y2={h - pad}
+                stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+              <line x1={pad} y1={h - pad - t * (h - 2 * pad)}
+                x2={w - pad} y2={h - pad - t * (h - 2 * pad)}
+                stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+            </g>
+          ))}
+          {pathD && (
+            <path d={pathD} fill="none" stroke="#0077ff" strokeWidth={1.5}
+              strokeLinecap="round" />
+          )}
+        </svg>
+
+        {/* Delete overlay on alt+hover */}
+        {isAltHeld && hovered && (
+          <div
+            style={{
+              position: 'absolute', inset: 0,
+              background: 'rgba(180,0,0,0.75)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              borderRadius: 3,
+            }}
+          >
+            <img src="icons/trash.svg" alt="Delete"
+              style={{ width: 24, height: 24, filter: 'invert(1)' }} />
+          </div>
+        )}
+      </div>
+      <div
+        style={{
+          fontSize: 10,
+          color: '#999',
+          marginTop: 3,
+          maxWidth: w + 4,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          textAlign: 'center',
+        }}
+      >
+        {preset.name}
+      </div>
+    </div>
+  );
+};

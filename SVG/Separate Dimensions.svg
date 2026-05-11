@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="_レイヤー_2" data-name="レイヤー 2" xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800">
+  <polyline id="Right-2" points="80.12 205.76 180.12 105.76 280.12 205.76" fill="none" stroke="#1850bf" stroke-miterlimit="133.33" stroke-width="35"/>
+  <line x1="180.12" y1="625.71" x2="180.12" y2="122.82" fill="none" stroke="#1850bf" stroke-miterlimit="133.33" stroke-width="35"/>
+  <polyline id="Right-2-2" data-name="Right-2" points="594.57 520.09 694.57 620.09 594.57 720.09" fill="none" stroke="#dc0807" stroke-miterlimit="133.33" stroke-width="35"/>
+  <line x1="176.06" y1="620.09" x2="680.71" y2="620.09" fill="none" stroke="#dc0807" stroke-miterlimit="133.33" stroke-width="35"/>
+  <rect x="130.07" y="569.58" width="100" height="100" rx="50" ry="50" fill="#fff"/>
+</svg>
