@@ -18,6 +18,23 @@ const ANCHOR_R = 6;
 const HANDLE_R = 4;
 const HIT_R = 10;
 const PADDING = 20;
+// Minimum X range to always keep [0,1] visible with ~15% padding on each side
+const X_RANGE_MIN = 1.3;
+
+function computeTargetViewY(curve: CurveData): { min: number; max: number } {
+  let minY = 0, maxY = 1;
+  for (const h of curve.handles) {
+    minY = Math.min(minY, h.out.y, h.in.y);
+    maxY = Math.max(maxY, h.out.y, h.in.y);
+  }
+  for (const mp of curve.midPoints) {
+    minY = Math.min(minY, mp.y);
+    maxY = Math.max(maxY, mp.y);
+  }
+  const range = maxY - minY;
+  const pad = Math.max(range * 0.15, 0.05);
+  return { min: minY - pad, max: maxY + pad };
+}
 
 export const CurveEditorCanvas: React.FC<Props> = ({
   curve,
@@ -28,9 +45,14 @@ export const CurveEditorCanvas: React.FC<Props> = ({
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 300, h: 300 });
   const [drag, setDrag] = useState<DragState | null>(null);
-  const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
-  const [isPanning, setIsPanning] = useState(false);
-  const panRef = useRef<{ startMouse: Point; startPan: Point } | null>(null);
+  const scaleRef = useRef(1);
+  const dragScaleRef = useRef<number | null>(null);
+
+  // Animated viewY — Y range computed from handle positions
+  const viewYRef = useRef(computeTargetViewY(curve));
+  const targetViewYRef = useRef(computeTargetViewY(curve));
+  const rafRef = useRef<number | null>(null);
+  const [viewY, setViewY] = useState(() => computeTargetViewY(curve));
 
   useLayoutEffect(() => {
     const el = containerRef.current;
@@ -43,26 +65,68 @@ export const CurveEditorCanvas: React.FC<Props> = ({
     return () => ro.disconnect();
   }, []);
 
+  useEffect(() => {
+    return () => { if (rafRef.current !== null) cancelAnimationFrame(rafRef.current); };
+  }, []);
+
+  const scheduleAnimation = useCallback(() => {
+    if (rafRef.current !== null) return;
+    const tick = () => {
+      const LERP = 0.14;
+      const target = targetViewYRef.current;
+      const curr = viewYRef.current;
+      const newMin = curr.min + (target.min - curr.min) * LERP;
+      const newMax = curr.max + (target.max - curr.max) * LERP;
+      const close = Math.abs(newMin - target.min) < 0.001 && Math.abs(newMax - target.max) < 0.001;
+      const next = close ? target : { min: newMin, max: newMax };
+      viewYRef.current = next;
+      setViewY(next);
+      rafRef.current = close ? null : requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  }, []);
+
+  useEffect(() => {
+    targetViewYRef.current = computeTargetViewY(curve);
+    scheduleAnimation();
+  }, [curve, scheduleAnimation]);
+
   const { w, h } = size;
   const graphW = w - 2 * PADDING;
   const graphH = h - 2 * PADDING;
 
-  // normalized → SVG pixels (accounts for pan)
+  // Single uniform scale (px/unit) that satisfies both constraints simultaneously:
+  //   graphH >= viewYRange * scale  →  full Y range (incl. overshoot) always visible
+  //   graphW >= X_RANGE_MIN * scale →  [0,1] in X always visible with padding
+  // Grid cells are always square because both axes use the same scale.
+  const viewYRange = viewY.max - viewY.min;
+  const scale = graphH > 0 && graphW > 0
+    ? Math.min(graphH / viewYRange, graphW / X_RANGE_MIN)
+    : 1;
+
+  // Derived visible extents
+  const viewXRange = graphW / scale;
+  const viewXMin   = 0.5 - viewXRange / 2;          // always centered at x=0.5
+  const viewYDisp  = graphH / scale;
+  const viewYMin   = (viewY.min + viewY.max) / 2 - viewYDisp / 2; // centered on handle range
+
+  // Keep ref updated for use inside effect closures
+  scaleRef.current = scale;
+
   const toSvg = useCallback(
     (p: Point): Point => ({
-      x: PADDING + (p.x - pan.x) * graphW,
-      y: h - PADDING - (p.y - pan.y) * graphH,
+      x: PADDING + (p.x - viewXMin) * scale,
+      y: h - PADDING - (p.y - viewYMin) * scale,
     }),
-    [graphW, graphH, h, pan]
+    [h, scale, viewXMin, viewYMin]
   );
 
-  // SVG pixels → normalized
   const fromSvg = useCallback(
     (s: Point): Point => ({
-      x: s.x / graphW - PADDING / graphW + pan.x,
-      y: 1 - (s.y - PADDING) / graphH + pan.y,
+      x: viewXMin + (s.x - PADDING) / scale,
+      y: viewYMin + (h - PADDING - s.y) / scale,
     }),
-    [graphW, graphH, pan]
+    [h, scale, viewXMin, viewYMin]
   );
 
   const getSvgPos = (e: MouseEvent | React.MouseEvent): Point => {
@@ -70,7 +134,6 @@ export const CurveEditorCanvas: React.FC<Props> = ({
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
-  // Hit-test: find draggable element under cursor
   const hitTest = useCallback(
     (svgPos: Point): DragTarget | null => {
       for (let i = 0; i < curve.midPoints.length; i++) {
@@ -80,10 +143,10 @@ export const CurveEditorCanvas: React.FC<Props> = ({
       }
       for (let seg = 0; seg < curve.handles.length; seg++) {
         const outSvg = toSvg(curve.handles[seg].out);
-        const inSvg = toSvg(curve.handles[seg].in);
+        const inSvg  = toSvg(curve.handles[seg].in);
         const dxO = svgPos.x - outSvg.x, dyO = svgPos.y - outSvg.y;
         if (dxO * dxO + dyO * dyO <= HIT_R * HIT_R) return { type: 'handleOut', segIndex: seg };
-        const dxI = svgPos.x - inSvg.x, dyI = svgPos.y - inSvg.y;
+        const dxI = svgPos.x - inSvg.x,  dyI = svgPos.y - inSvg.y;
         if (dxI * dxI + dyI * dyI <= HIT_R * HIT_R) return { type: 'handleIn', segIndex: seg };
       }
       return null;
@@ -91,7 +154,6 @@ export const CurveEditorCanvas: React.FC<Props> = ({
     [curve, toSvg]
   );
 
-  // Find the nearest ease handle (out or in) to a given SVG position
   const findNearestHandle = useCallback(
     (svgPos: Point): DragTarget | null => {
       let minDist = Infinity;
@@ -113,31 +175,21 @@ export const CurveEditorCanvas: React.FC<Props> = ({
   );
 
   const onMouseDown = (e: React.MouseEvent) => {
-    if (e.button === 2) { e.preventDefault(); setPan({ x: 0, y: 0 }); return; }
-
-    const svgPos = getSvgPos(e);
-
-    if (e.button === 1) {
-      e.preventDefault();
-      panRef.current = { startMouse: svgPos, startPan: { ...pan } };
-      setIsPanning(true);
-      return;
-    }
-
-    if (e.button !== 0) return;
+    if (e.button !== 0) { e.preventDefault(); return; }
     e.preventDefault();
 
+    const svgPos = getSvgPos(e);
     const target = hitTest(svgPos);
     if (target) {
       let startValue: Point;
-      if (target.type === 'midpoint') startValue = { ...curve.midPoints[target.index] };
+      if (target.type === 'midpoint')    startValue = { ...curve.midPoints[target.index] };
       else if (target.type === 'handleOut') startValue = { ...curve.handles[target.segIndex].out };
-      else startValue = { ...curve.handles[target.segIndex].in };
+      else                                  startValue = { ...curve.handles[target.segIndex].in };
+      dragScaleRef.current = scaleRef.current;
       setDrag({ target, startSvgPos: svgPos, startValue });
       return;
     }
 
-    // No direct hit: snap the nearest ease handle to the cursor, then start dragging it
     const nearest = findNearestHandle(svgPos);
     if (!nearest) return;
     const cursorNorm = fromSvg(svgPos);
@@ -145,82 +197,78 @@ export const CurveEditorCanvas: React.FC<Props> = ({
     if (nearest.type === 'handleOut') next.handles[nearest.segIndex].out = cursorNorm;
     else if (nearest.type === 'handleIn') next.handles[nearest.segIndex].in = cursorNorm;
     onChange(next);
+    dragScaleRef.current = scaleRef.current;
     setDrag({ target: nearest, startSvgPos: svgPos, startValue: cursorNorm });
   };
 
-  // Drag (left button) — update curve
+  // Capture scale at drag-start so mid-drag view changes don't cause jumps
   useEffect(() => {
     if (!drag) return;
     const onMove = (e: MouseEvent) => {
       const svgPos = getSvgPos(e);
-      const dx = (svgPos.x - drag.startSvgPos.x) / graphW;
-      const dy = -(svgPos.y - drag.startSvgPos.y) / graphH;
+      const s = dragScaleRef.current ?? scaleRef.current;
+      const dx =  (svgPos.x - drag.startSvgPos.x) / s;
+      const dy = -(svgPos.y - drag.startSvgPos.y) / s;
       const newVal: Point = { x: drag.startValue.x + dx, y: drag.startValue.y + dy };
 
       const next = JSON.parse(JSON.stringify(curve)) as CurveData;
       const { target } = drag;
-      if (target.type === 'midpoint') next.midPoints[target.index] = newVal;
+      if (target.type === 'midpoint')    next.midPoints[target.index]         = newVal;
       else if (target.type === 'handleOut') next.handles[target.segIndex].out = newVal;
-      else next.handles[target.segIndex].in = newVal;
+      else                                  next.handles[target.segIndex].in  = newVal;
       onChange(next);
     };
-    const onUp = () => setDrag(null);
+    const onUp = () => { setDrag(null); dragScaleRef.current = null; };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-  }, [drag, curve, graphW, graphH, onChange]);
+  }, [drag, curve, onChange]);
 
-  // Pan (middle button)
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      if (!panRef.current) return;
-      const svgPos = { x: e.clientX - svgRef.current!.getBoundingClientRect().left,
-                       y: e.clientY - svgRef.current!.getBoundingClientRect().top };
-      const dx = (svgPos.x - panRef.current.startMouse.x) / graphW;
-      const dy = -(svgPos.y - panRef.current.startMouse.y) / graphH;
-      setPan({ x: panRef.current.startPan.x - dx, y: panRef.current.startPan.y - dy });
-    };
-    const onUp = () => { panRef.current = null; setIsPanning(false); };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-  }, [graphW, graphH]);
-
-  // --- Build grid lines in normalized space, clipped to canvas ---
+  // ── Grid ──────────────────────────────────────────────────────────────────
+  const gridStep = 1 / gridDivisions; // 0.2 for 5 divisions
   const gridLines: React.ReactElement[] = [];
-  const nDiv = gridDivisions;
-  // Compute which line indices are potentially visible (add buffer of 2)
-  const xMin = pan.x, xMax = pan.x + 1;
-  const yMin = pan.y, yMax = pan.y + 1;
-  const iXStart = Math.floor(xMin * nDiv) - 1;
-  const iXEnd   = Math.ceil(xMax * nDiv) + 1;
-  const iYStart = Math.floor(yMin * nDiv) - 1;
-  const iYEnd   = Math.ceil(yMax * nDiv) + 1;
 
+  // Grid color constants:
+  // - dim (standard, every gridStep)  : rgba(255,255,255,0.07)
+  // - mid (large frame, every 1 unit) : rgba(255,255,255,0.22)
+  // - white (main ease, x=0 and y=0) : #ffffff (rendered separately below)
+  const STROKE_DIM = 'rgba(255,255,255,0.07)';
+  const STROKE_MID = 'rgba(255,255,255,0.22)';
+
+  const viewXMax = viewXMin + viewXRange;
+  const iXStart  = Math.floor(viewXMin / gridStep) - 1;
+  const iXEnd    = Math.ceil(viewXMax  / gridStep) + 1;
   for (let i = iXStart; i <= iXEnd; i++) {
-    const t = i / nDiv;
+    const t = i * gridStep;
+    if (Math.abs(t) < 0.001) continue; // x=0 → white, rendered separately
     const svgX = toSvg({ x: t, y: 0 }).x;
+    const isInt = Math.abs(t - Math.round(t)) < 0.001;
     gridLines.push(
       <line key={`v${i}`} x1={svgX} y1={PADDING} x2={svgX} y2={h - PADDING}
-        stroke="rgba(255,255,255,0.07)" strokeWidth={1} />
+        stroke={isInt ? STROKE_MID : STROKE_DIM} strokeWidth={1} />
     );
   }
+
+  const viewYMax = viewYMin + viewYDisp;
+  const iYStart  = Math.floor(viewYMin / gridStep) - 1;
+  const iYEnd    = Math.ceil(viewYMax  / gridStep) + 1;
   for (let i = iYStart; i <= iYEnd; i++) {
-    const t = i / nDiv;
+    const t = i * gridStep;
+    if (Math.abs(t) < 0.001) continue; // y=0 → white, rendered separately
     const svgY = toSvg({ x: 0, y: t }).y;
+    const isInt = Math.abs(t - Math.round(t)) < 0.001;
     gridLines.push(
       <line key={`h${i}`} x1={PADDING} y1={svgY} x2={w - PADDING} y2={svgY}
-        stroke="rgba(255,255,255,0.07)" strokeWidth={1} />
+        stroke={isInt ? STROKE_MID : STROKE_DIM} strokeWidth={1} />
     );
   }
 
-  // Highlight 0 and 1 axes (slightly brighter)
-  const axis0X = toSvg({ x: 0, y: 0 }).x;
-  const axis1X = toSvg({ x: 1, y: 0 }).x;
-  const axis0Y = toSvg({ x: 0, y: 0 }).y;
-  const axis1Y = toSvg({ x: 0, y: 1 }).y;
+  // Main ease lines: x=0 (left edge) and y=0 (bottom edge) — white only
+  const ax0 = toSvg({ x: 0, y: 0 }).x;
+  const ay0 = toSvg({ x: 0, y: 0 }).y;
+  // (x=1 and y=1 are handled as integer-step lines above with STROKE_MID)
 
-  const anchors = getAnchorPoints(curve);
+  const anchors   = getAnchorPoints(curve);
   const curvePath = buildSvgPath(curve, toSvg);
 
   return (
@@ -232,71 +280,67 @@ export const CurveEditorCanvas: React.FC<Props> = ({
         ref={svgRef}
         width={w}
         height={h}
-        style={{ display: 'block', userSelect: 'none', cursor: drag ? 'grabbing' : isPanning ? 'grabbing' : 'default' }}
+        style={{ display: 'block', userSelect: 'none', cursor: drag ? 'grabbing' : 'default' }}
         onMouseDown={onMouseDown}
-        onContextMenu={e => { e.preventDefault(); setPan({ x: 0, y: 0 }); }}
+        onContextMenu={e => e.preventDefault()}
       >
         <defs>
           <clipPath id="gc">
-            <rect x={PADDING} y={PADDING} width={w - 2 * PADDING} height={h - 2 * PADDING} />
+            <rect x={PADDING} y={PADDING} width={graphW} height={graphH} />
           </clipPath>
         </defs>
 
-        {/* Background */}
         <rect x={0} y={0} width={w} height={h} fill="#0d0d0d" />
 
-        {/* Grid (clipped) */}
         <g clipPath="url(#gc)">
           {gridLines}
-          {/* Axis lines (brighter) */}
-          <line x1={axis0X} y1={PADDING} x2={axis0X} y2={h - PADDING} stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
-          <line x1={axis1X} y1={PADDING} x2={axis1X} y2={h - PADDING} stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
-          <line x1={PADDING} y1={axis0Y} x2={w - PADDING} y2={axis0Y} stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
-          <line x1={PADDING} y1={axis1Y} x2={w - PADDING} y2={axis1Y} stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
 
-          {/* Curve */}
+          {/* Main ease lines: x=0 (left) and y=0 (bottom) only — white */}
+          <line x1={ax0} y1={PADDING} x2={ax0} y2={h - PADDING} stroke="#ffffff" strokeWidth={1} />
+          <line x1={PADDING} y1={ay0} x2={w - PADDING} y2={ay0} stroke="#ffffff" strokeWidth={1} />
+
           {curvePath && (
             <path d={curvePath} fill="none" stroke="#ffffff" strokeWidth={2} strokeLinecap="round" />
           )}
         </g>
 
-        {/* Canvas border */}
-        <rect x={PADDING} y={PADDING} width={w - 2 * PADDING} height={h - 2 * PADDING}
+        {/* Graph border */}
+        <rect x={PADDING} y={PADDING} width={graphW} height={graphH}
           fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth={1} />
 
-        {/* Handle lines (not clipped, so handles outside grid are visible) */}
+        {/* Handle stems (not clipped so handles outside [0,1] are visible) */}
         {curve.handles.map((hp, seg) => {
-          const la = toSvg(anchors[seg]);
-          const ra = toSvg(anchors[seg + 1]);
+          const la     = toSvg(anchors[seg]);
+          const ra     = toSvg(anchors[seg + 1]);
           const outSvg = toSvg(hp.out);
-          const inSvg = toSvg(hp.in);
+          const inSvg  = toSvg(hp.in);
           return (
             <g key={seg}>
               <line x1={la.x} y1={la.y} x2={outSvg.x} y2={outSvg.y} stroke="#0077ff" strokeWidth={1.5} />
-              <line x1={ra.x} y1={ra.y} x2={inSvg.x} y2={inSvg.y} stroke="#0077ff" strokeWidth={1.5} />
+              <line x1={ra.x} y1={ra.y} x2={inSvg.x}  y2={inSvg.y}  stroke="#0077ff" strokeWidth={1.5} />
             </g>
           );
         })}
 
-        {/* Handle endpoints */}
+        {/* Handle dots */}
         {curve.handles.map((hp, seg) => {
           const outSvg = toSvg(hp.out);
-          const inSvg = toSvg(hp.in);
+          const inSvg  = toSvg(hp.in);
           return (
             <g key={seg}>
               <circle cx={outSvg.x} cy={outSvg.y} r={HANDLE_R} fill="#0077ff" style={{ cursor: 'grab' }} />
-              <circle cx={inSvg.x} cy={inSvg.y} r={HANDLE_R} fill="#0077ff" style={{ cursor: 'grab' }} />
+              <circle cx={inSvg.x}  cy={inSvg.y}  r={HANDLE_R} fill="#0077ff" style={{ cursor: 'grab' }} />
             </g>
           );
         })}
 
-        {/* Fixed anchors: start (0,0) and end (1,1) */}
+        {/* Fixed anchor points: (0,0) and (1,1) */}
         {[{ x: 0, y: 0 }, { x: 1, y: 1 }].map((p, i) => {
           const sp = toSvg(p);
           return <circle key={i} cx={sp.x} cy={sp.y} r={ANCHOR_R} fill="#0077ff" stroke="#ffffff" strokeWidth={1.5} />;
         })}
 
-        {/* Midpoint anchors (draggable) */}
+        {/* Midpoint anchors */}
         {curve.midPoints.map((mp, i) => {
           const sp = toSvg(mp);
           return <circle key={i} cx={sp.x} cy={sp.y} r={ANCHOR_R} fill="#0077ff" stroke="#ffffff" strokeWidth={1.5} style={{ cursor: 'grab' }} />;

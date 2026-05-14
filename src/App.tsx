@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { AppSettings, CurveData, ImportMode, Preset } from './types';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { AppSettings, CurveData, ExportedPresets, ImportMode, Preset } from './types';
 import { CurveEditorCanvas } from './components/CurveEditorCanvas';
 import { ImportDialog } from './components/ImportDialog';
 import { PresetPanel } from './components/PresetPanel';
@@ -18,11 +18,14 @@ import {
 } from './utils/curveUtils';
 import { callHost, isInCEP } from './utils/cepBridge';
 import {
-  copyPresetFile,
-  ensureDir,
+  autoSaveToCanonical,
+  basename,
   getDefaultSaveLocation,
+  loadPresetsFromCanonical,
   loadPresetsFromFile,
+  mergePresets,
   openFileDialog,
+  openSaveDialog,
   savePresetsToFile,
 } from './utils/fileUtils';
 
@@ -39,47 +42,45 @@ function loadSettings(): AppSettings {
   try { const r = localStorage.getItem(STORAGE_SETTINGS); if (r) return { ...DEFAULT_SETTINGS, ...JSON.parse(r) }; } catch {}
   return { ...DEFAULT_SETTINGS };
 }
-function loadPresets(): Preset[] {
+function saveSettings(s: AppSettings) { localStorage.setItem(STORAGE_SETTINGS, JSON.stringify(s)); }
+
+/** Try canonical file first, fall back to localStorage. */
+function initPresets(): Preset[] {
+  const file = loadPresetsFromCanonical();
+  if (file.ok && file.data) return file.data.presets.map((p, i) => ({ ...p, order: i }));
   try { const r = localStorage.getItem(STORAGE_PRESETS); if (r) return JSON.parse(r); } catch {}
   return [];
 }
-function saveSettings(s: AppSettings) { localStorage.setItem(STORAGE_SETTINGS, JSON.stringify(s)); }
-function savePresets(p: Preset[]) { localStorage.setItem(STORAGE_PRESETS, JSON.stringify(p)); }
 
-// Toolbar fixed heights (px) – toolbar + 2 inputs + apply + small borders
-const FIXED_H = 36 + 28 + 28 + 44 + 4;
+interface PendingImport {
+  data: ExportedPresets;
+  originalName: string;
+}
 
 export const App: React.FC = () => {
   const [curve, setCurveRaw] = useState<CurveData>(createDefaultCurve);
   const [text1, setText1] = useState(() => curveToTextBox1(createDefaultCurve()));
   const [text2, setText2] = useState('');
   const [separateDimensions, setSeparateDimensions] = useState(false);
-  const [presets, setPresets] = useState<Preset[]>(loadPresets);
+  const [presets, setPresets] = useState<Preset[]>(initPresets);
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [showSave, setShowSave] = useState(false);
-  const [showImport, setShowImport] = useState(false);
+  const [pendingImport, setPendingImport] = useState<PendingImport | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [dividerPos, setDividerPos] = useState(0.68);
   const [status, setStatus] = useState('');
-  const [graphSide, setGraphSide] = useState(300);
 
-  const leftPanelRef = useRef<HTMLDivElement>(null);
-  const dividerRef = useRef<{ startX: number; startPos: number } | null>(null);
+  const dividerRef   = useRef<{ startX: number; startPos: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const popoutRef = useRef<Window | null>(null);
+  const popoutRef    = useRef<Window | null>(null);
+  const didMountRef  = useRef(false);
 
-  // Enforce 1:1 graph ratio
-  useLayoutEffect(() => {
-    const el = leftPanelRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(([entry]) => {
-      const { width, height } = entry.contentRect;
-      const side = Math.max(80, Math.min(width, height - FIXED_H));
-      setGraphSide(side);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+  // Auto-persist to localStorage + canonical file on every presets change (skip first render)
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+    try { localStorage.setItem(STORAGE_PRESETS, JSON.stringify(presets)); } catch {}
+    autoSaveToCanonical(presets);
+  }, [presets]);
 
   const setCurve = useCallback((c: CurveData) => {
     setCurveRaw(c);
@@ -123,16 +124,15 @@ export const App: React.FC = () => {
   const showStatus = (msg: string) => { setStatus(msg); setTimeout(() => setStatus(''), 3000); };
 
   const handleImportEase = async () => {
-    if (!isInCEP()) { showStatus('Not in AE'); return; }
+    if (!isInCEP()) return;
     try {
       const r = await callHost<{ ok: boolean; curve?: CurveData; error?: string }>('smoothio_importEase');
-      if (r.ok && r.curve) { setCurve(r.curve); showStatus('Ease imported'); }
-      else showStatus(r.error || 'Import failed');
-    } catch (e) { showStatus(String(e)); }
+      if (r.ok && r.curve) setCurve(r.curve);
+    } catch (e) {}
   };
 
   const handleApply = async () => {
-    if (!isInCEP()) { showStatus('Not in AE'); return; }
+    if (!isInCEP()) return;
     try {
       const r = await callHost<{ ok: boolean; error?: string }>(
         'smoothio_applyEasing', curve, separateDimensions
@@ -163,35 +163,53 @@ export const App: React.FC = () => {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2),
       name, curve: cloneCurve(curve), createdAt: Date.now(), order: presets.length,
     };
-    const next = [...presets, p];
-    setPresets(next); savePresets(next); setShowSave(false); showStatus(`Saved: ${name}`);
+    setPresets(prev => [...prev, p]);
+    setShowSave(false);
   };
 
   const handleDeletePreset = (id: string) => {
-    const next = presets.filter(p => p.id !== id);
-    setPresets(next); savePresets(next);
+    setPresets(prev => prev.filter(p => p.id !== id));
   };
 
-  const handleLoadPreset = (preset: Preset) => { setCurve(cloneCurve(preset.curve)); showStatus(`Loaded: ${preset.name}`); };
+  const handleLoadPreset = (preset: Preset) => { setCurve(cloneCurve(preset.curve)); };
 
+  // ── Export ────────────────────────────────────────────────────────────────
   const handleExport = () => {
-    ensureDir(settings.presetSaveLocation);
-    const res = savePresetsToFile(presets, settings.presetSaveLocation);
-    showStatus(res.ok ? `Exported` : `Export failed: ${res.error}`);
+    const savedPath = openSaveDialog(settings.presetSaveLocation, 'Smoothio_Presets.json');
+    if (!savedPath) return;
+    const res = savePresetsToFile(presets, savedPath);
+    const filename = savedPath.split(/[\\/]/).pop() ?? savedPath;
+    showStatus(res.ok ? `Exported: ${filename}` : `Export error: ${res.error}`);
   };
 
+  // ── Import (two-step: file dialog → mode dialog → merge) ────────────────
   const handleImportFile = () => {
     const filePath = openFileDialog(settings.presetSaveLocation);
     if (!filePath) return;
     const res = loadPresetsFromFile(filePath);
-    if (!res.ok || !res.data) { showStatus(`Import failed: ${res.error}`); return; }
-    copyPresetFile(filePath, settings.presetSaveLocation);
-    const next = res.data.presets.map((p, i) => ({ ...p, order: i }));
-    setPresets(next); savePresets(next); showStatus(`Imported ${next.length} preset(s)`);
+    if (!res.ok || !res.data) {
+      showStatus('Import error: invalid file');
+      return;
+    }
+    setPendingImport({ data: res.data, originalName: basename(filePath) });
   };
 
+  const handleImportConfirm = (mode: ImportMode) => {
+    if (!pendingImport) return;
+    const next = mergePresets(presets, pendingImport.data.presets, mode);
+    setPresets(next);
+    showStatus(`Imported: ${pendingImport.originalName}`);
+    setPendingImport(null);
+  };
+
+  const handleImportCancel = () => setPendingImport(null);
+
   const handleSaveSettings = (s: AppSettings) => { setSettings(s); saveSettings(s); };
-  const handleDeleteAllPresets = () => { setPresets([]); savePresets([]); showStatus('All presets deleted'); };
+  const handleDeleteAllPresets = () => { setPresets([]); };
+
+  const handleReorderPresets = useCallback((reordered: Preset[]) => {
+    setPresets(reordered);
+  }, []);
 
   // Divider drag
   const onDividerMouseDown = (e: React.MouseEvent) => {
@@ -227,7 +245,6 @@ export const App: React.FC = () => {
     >
       {/* Left panel */}
       <div
-        ref={leftPanelRef}
         style={{
           width: `${dividerPos * 100}%`,
           display: 'flex',
@@ -236,24 +253,14 @@ export const App: React.FC = () => {
           overflow: 'hidden',
         }}
       >
-        {/* 1:1 graph */}
-        <div
-          style={{
-            width: graphSide,
-            height: graphSide,
-            flexShrink: 0,
-            alignSelf: 'center',
-          }}
-        >
+        {/* Graph fills all available space above the controls */}
+        <div style={{ flex: 1, minHeight: 80, overflow: 'hidden' }}>
           <CurveEditorCanvas
             curve={curve}
             onChange={setCurve}
             gridDivisions={5}
-            />
+          />
         </div>
-
-        {/* Spacer to push controls to bottom if graph is smaller than panel width */}
-        <div style={{ flex: 1 }} />
 
         {/* Toolbar */}
         <ToolBar
@@ -282,18 +289,36 @@ export const App: React.FC = () => {
           spellCheck={false}
         />
 
-        {/* Apply */}
+        {/* Apply — crossfade between "APPLY" and status text */}
         <button
           onClick={handleApply}
           style={{
             height: 44, background: '#0077ff', border: 'none',
-            color: '#fff', fontSize: 15, fontWeight: 700,
-            cursor: 'pointer', letterSpacing: 1, flexShrink: 0,
+            color: '#fff', cursor: 'pointer', flexShrink: 0,
+            position: 'relative', overflow: 'hidden',
           }}
-          onMouseEnter={e => ((e.target as HTMLElement).style.background = '#0055cc')}
-          onMouseLeave={e => ((e.target as HTMLElement).style.background = '#0077ff')}
+          onMouseEnter={e => ((e.currentTarget as HTMLElement).style.background = '#0055cc')}
+          onMouseLeave={e => ((e.currentTarget as HTMLElement).style.background = '#0077ff')}
         >
-          {status || 'APPLY'}
+          <span style={{
+            position: 'absolute', inset: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 15, fontWeight: 700, letterSpacing: 1,
+            opacity: status ? 0 : 1, transition: 'opacity 0.25s',
+            pointerEvents: 'none',
+          }}>APPLY</span>
+          <span style={{
+            position: 'absolute', inset: '0 10px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            opacity: status ? 1 : 0, transition: 'opacity 0.25s',
+            pointerEvents: 'none', overflow: 'hidden',
+          }}>
+            <span style={{
+              fontSize: 11, fontWeight: 600, letterSpacing: 0.2,
+              overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+              maxWidth: '100%',
+            }}>{status}</span>
+          </span>
         </button>
       </div>
 
@@ -322,11 +347,19 @@ export const App: React.FC = () => {
           onExport={handleExport}
           onImport={handleImportFile}
           onSettings={() => setShowSettings(true)}
+          onReorderPresets={handleReorderPresets}
         />
       </div>
 
       {/* Dialogs */}
       {showSave && <SavePresetDialog curve={curve} onSave={handleSavePreset} onCancel={() => setShowSave(false)} />}
+      {pendingImport && (
+        <ImportDialog
+          fileName={pendingImport.originalName}
+          onImport={handleImportConfirm}
+          onCancel={handleImportCancel}
+        />
+      )}
       {showSettings && (
         <SettingsDialog
           settings={settings}

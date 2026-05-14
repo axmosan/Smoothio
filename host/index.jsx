@@ -68,17 +68,45 @@ function findKeyAtTime(prop, t) {
 
 // ─── Ease application ────────────────────────────────────────────────────────
 
-// localHandle coords are in SEGMENT-LOCAL space (where start=0,0 end=1,1).
-function toEase(localHandle, dv, dt) {
-  var ox = localHandle.out.x, oy = localHandle.out.y;
-  var hIn = localHandle['in'];
-  var ix = hIn.x, iy = hIn.y;
+// Returns true if any handle Y goes outside [0,1] in segment-local space.
+function curveHasOvershoot(handles, midPts) {
+  var guiAnchors = [{ x: 0, y: 0 }];
+  for (var i = 0; i < midPts.length; i++) guiAnchors.push({ x: midPts[i].x, y: midPts[i].y });
+  guiAnchors.push({ x: 1, y: 1 });
+  for (var hi = 0; hi < handles.length; hi++) {
+    var segA = guiAnchors[hi], segB = guiAnchors[hi + 1];
+    var sdy = segB.y - segA.y;
+    var loy, liy;
+    if (Math.abs(sdy) < 1e-10) {
+      loy = handles[hi].out.y;
+      liy = handles[hi]['in'].y;
+    } else {
+      loy = (handles[hi].out.y - segA.y) / sdy;
+      liy = (handles[hi]['in'].y - segA.y) / sdy;
+    }
+    if (loy > 1.001 || loy < -0.001 || liy > 1.001 || liy < -0.001) return true;
+  }
+  return false;
+}
 
-  var outInfl = Math.max(0.1, Math.min(99.9, ox * 100));
-  var outSpd  = (ox > 0.001) ? (oy / ox) * (dv / dt) : (dv > 0 ? 9999 : -9999);
+// Build one KeyframeEase pair from segment-local handle coords.
+// dv can be negative (overshoot) for non-spatial properties.
+function computeEasePair(lox, loy, lix, liy, dv, dt) {
+  var outInfl = Math.max(0.1, Math.min(99.9, lox * 100));
+  var outSpd;
+  if (lox > 0.001) {
+    outSpd = (loy / lox) * (dv / dt);
+  } else {
+    outSpd = (Math.abs(dv) < 1e-10) ? 0 : (dv > 0 ? 9999 : -9999);
+  }
 
-  var inInfl  = Math.max(0.1, Math.min(99.9, (1 - ix) * 100));
-  var inSpd   = (ix < 0.999) ? ((1 - iy) / (1 - ix)) * (dv / dt) : (dv > 0 ? 9999 : -9999);
+  var inInfl = Math.max(0.1, Math.min(99.9, (1 - lix) * 100));
+  var inSpd;
+  if (lix < 0.999) {
+    inSpd = ((1 - liy) / (1 - lix)) * (dv / dt);
+  } else {
+    inSpd = (Math.abs(dv) < 1e-10) ? 0 : (dv > 0 ? 9999 : -9999);
+  }
 
   return {
     easeOut: new KeyframeEase(outSpd, outInfl),
@@ -89,14 +117,13 @@ function toEase(localHandle, dv, dt) {
 // Apply ease to one keyframe segment [kA, kB].
 // segA, segB: this ease-segment's anchor positions in global [0,1] canvas space.
 // Handles are in global space and get transformed to segment-local space here.
+// For non-spatial multi-dim properties (e.g. Scale), builds per-dimension ease arrays.
 function applySegment(prop, kA, kB, handle, segA, segB) {
   if (!segA) segA = { x: 0, y: 0 };
   if (!segB) segB = { x: 1, y: 1 };
 
   var dt = prop.keyTime(kB) - prop.keyTime(kA);
   if (dt <= 0) return;
-  var dv = valueDiff(prop.keyValue(kA), prop.keyValue(kB));
-  if (Math.abs(dv) < 1e-6) dv = 1;
 
   // Transform global handle coords → segment-local [0,1] space
   var sdx = segB.x - segA.x;
@@ -111,15 +138,43 @@ function applySegment(prop, kA, kB, handle, segA, segB) {
     lix = (handle['in'].x - segA.x) / sdx;
     liy = (handle['in'].y - segA.y) / sdy;
   }
-  var localHandle = { out: { x: lox, y: loy } };
-  localHandle['in'] = { x: lix, y: liy };
+
+  // Linear ease: handles lie on the diagonal (loy≈lox, liy≈lix) → use LINEAR interpolation
+  if (Math.abs(loy - lox) < 0.02 && Math.abs(liy - lix) < 0.02) {
+    try { prop.setInterpolationTypeAtKey(kA, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR); } catch (e) {}
+    try { prop.setInterpolationTypeAtKey(kB, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR); } catch (e) {}
+    return;
+  }
 
   try { prop.setInterpolationTypeAtKey(kA, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER); } catch (e) {}
   try { prop.setInterpolationTypeAtKey(kB, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER); } catch (e) {}
 
-  var ease = toEase(localHandle, dv, dt);
-  try { prop.setTemporalEaseAtKey(kA, prop.keyInTemporalEase(kA), [ease.easeOut]); } catch (e2) {}
-  try { prop.setTemporalEaseAtKey(kB, [ease.easeIn], prop.keyOutTemporalEase(kB)); } catch (e2) {}
+  var vA = prop.keyValue(kA);
+  var vB = prop.keyValue(kB);
+  var isMultiDim = (typeof vA === 'object' && vA !== null && vA.length > 1);
+  var isSpatial = false;
+  try { isSpatial = prop.isSpatial; } catch (e) {}
+
+  var outEases = [], inEases = [];
+  if (!isMultiDim || isSpatial) {
+    // 1D scalar or spatial (single ease covers all dimensions)
+    var dv = valueDiff(vA, vB);
+    if (Math.abs(dv) < 1e-10) dv = 0;
+    var pair = computeEasePair(lox, loy, lix, liy, dv, dt);
+    outEases = [pair.easeOut];
+    inEases  = [pair.easeIn];
+  } else {
+    // Non-spatial multi-dim (e.g. Scale): one KeyframeEase per dimension
+    for (var d = 0; d < vA.length; d++) {
+      var dv_d = vB[d] - vA[d];
+      var pair_d = computeEasePair(lox, loy, lix, liy, dv_d, dt);
+      outEases.push(pair_d.easeOut);
+      inEases.push(pair_d.easeIn);
+    }
+  }
+
+  try { prop.setTemporalEaseAtKey(kA, prop.keyInTemporalEase(kA), outEases); } catch (e2) {}
+  try { prop.setTemporalEaseAtKey(kB, inEases, prop.keyOutTemporalEase(kB)); } catch (e2) {}
 }
 
 // Insert midpoint keyframes between kA and kB, then apply ease per sub-segment.
@@ -218,6 +273,8 @@ function smoothio_applyEasing(curveData, separateDim) {
   var midPts   = curve.midPoints || [];
   if (!handles.length) return err('Empty curve');
 
+  var hasOvershoot = curveHasOvershoot(handles, midPts);
+
   app.beginUndoGroup('Smoothio: Apply Easing');
   var count = 0;
 
@@ -225,7 +282,7 @@ function smoothio_applyEasing(curveData, separateDim) {
     for (var li = 0; li < comp.selectedLayers.length; li++) {
       var layer = comp.selectedLayers[li];
 
-      if (separate) {
+      if (separate || hasOvershoot) {
         walkProps(layer, function (prop) {
           if (prop.dimensionsSeparated !== undefined && !prop.dimensionsSeparated) {
             try { prop.dimensionsSeparated = true; } catch (e) {}

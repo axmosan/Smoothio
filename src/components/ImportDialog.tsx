@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ImportMode } from '../types';
 
 interface Props {
+  fileName: string;
   onImport: (mode: ImportMode) => void;
   onCancel: () => void;
 }
@@ -24,17 +25,20 @@ const MODES: { mode: ImportMode; label: string; description: string }[] = [
   },
 ];
 
-export const ImportDialog: React.FC<Props> = ({ onImport, onCancel }) => {
+export const ImportDialog: React.FC<Props> = ({ fileName, onImport, onCancel }) => {
   const [selected, setSelected] = useState<ImportMode>('skip');
 
   return (
     <div style={overlay}>
       <div style={modal}>
         <h2 style={{ color: '#e0e0e0', fontSize: 20, fontWeight: 600, marginBottom: 4 }}>
-          Import Preset Option
+          Import Presets
         </h2>
+        <p style={{ color: '#aaa', fontSize: 12, marginBottom: 4 }}>
+          File: <span style={{ color: '#e0e0e0' }}>{fileName}</span>
+        </p>
         <p style={{ color: '#666', fontSize: 12, marginBottom: 20 }}>
-          If there is no conflict with existing presets, they will be kept as is.
+          Non-conflicting presets are always kept.
         </p>
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
