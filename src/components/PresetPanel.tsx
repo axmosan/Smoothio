@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { Preset } from '../types';
 import { PresetCard } from './PresetCard';
 
-const DRAG_THRESHOLD = 6; // px before drag starts
+const DRAG_THRESHOLD = 6;   // px before drag starts
 const FLIP_DURATION  = 180; // ms for card swap animation
 
 interface Props {
@@ -46,35 +46,30 @@ export const PresetPanel: React.FC<Props> = ({
 }) => {
   const [isAltHeld, setIsAltHeld] = useState(false);
   const [dragId,    setDragId]    = useState<string | null>(null);
-  const [overIdx,   setOverIdx]   = useState<number | null>(null);
+  const [liveOrder, setLiveOrder] = useState<Preset[] | null>(null);
 
-  // Stable refs for window event handlers
+  // Stable refs for window event handlers (avoid stale closures)
   const pendingRef    = useRef<{ id: string; startX: number; startY: number } | null>(null);
   const dragIdRef     = useRef<string | null>(null);
-  const overIdxRef    = useRef<number | null>(null);
+  const liveOrderRef  = useRef<Preset[]>([]);
   const sortedRef     = useRef<Preset[]>([]);
   const isAltHeldRef  = useRef(false);
   const didDragRef    = useRef(false);
 
   // Card DOM refs for FLIP animation
-  const cardRefs          = useRef<Map<string, HTMLDivElement>>(new Map());
+  const cardRefs           = useRef<Map<string, HTMLDivElement>>(new Map());
   const pendingSnapshotRef = useRef<Map<string, DOMRect> | null>(null);
 
   const sorted = useMemo(() => [...presets].sort((a, b) => a.order - b.order), [presets]);
   sortedRef.current = sorted;
 
-  // Live visual reorder while dragging
+  // Use live order during drag, fall back to sorted otherwise
   const displayPresets = useMemo(() => {
-    if (dragId === null || overIdx === null) return sorted;
-    const fromIdx = sorted.findIndex(p => p.id === dragId);
-    if (fromIdx === -1 || fromIdx === overIdx) return sorted;
-    const arr = [...sorted];
-    const [item] = arr.splice(fromIdx, 1);
-    arr.splice(overIdx, 0, item);
-    return arr;
-  }, [sorted, dragId, overIdx]);
+    if (dragId === null || liveOrder === null) return sorted;
+    return liveOrder;
+  }, [sorted, dragId, liveOrder]);
 
-  // FLIP: run after displayPresets DOM mutations, animate using stored snapshot
+  // FLIP: after displayPresets DOM mutations, animate cards from their old positions
   useLayoutEffect(() => {
     const snapshot = pendingSnapshotRef.current;
     pendingSnapshotRef.current = null;
@@ -96,67 +91,68 @@ export const PresetPanel: React.FC<Props> = ({
     });
   }, [displayPresets]);
 
-  // Mouse enters a card while dragging → snapshot + update overIdx
-  const handleCardMouseEnter = useCallback((id: string, idx: number) => {
+  // Mouse enters a card while dragging → swap within liveOrder (cumulative)
+  const handleCardMouseEnter = useCallback((id: string) => {
     if (dragIdRef.current === null || id === dragIdRef.current) return;
-    // Snapshot current positions before state update
+
+    const live     = liveOrderRef.current;
+    const fromIdx  = live.findIndex(p => p.id === dragIdRef.current);
+    const toIdx    = live.findIndex(p => p.id === id);
+    if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+
     const snapshot = new Map<string, DOMRect>();
     cardRefs.current.forEach((el, cid) => snapshot.set(cid, el.getBoundingClientRect()));
     pendingSnapshotRef.current = snapshot;
-    overIdxRef.current = idx;
-    setOverIdx(idx);
+
+    const arr = [...live];
+    [arr[fromIdx], arr[toIdx]] = [arr[toIdx], arr[fromIdx]];
+    liveOrderRef.current = arr;
+    setLiveOrder(arr);
   }, []);
 
-  // Card mousedown → start pending drag
+  // Card mousedown → start pending drag (skip entirely when Alt is held)
   const handleCardPointerDown = useCallback((id: string, e: React.MouseEvent) => {
     if (dragIdRef.current !== null) return;
+    if (isAltHeldRef.current) return; // Alt mode = click-only, no drag
     pendingRef.current = { id, startX: e.clientX, startY: e.clientY };
   }, []);
 
-  // Global mousemove: cross threshold → promote pending to drag
+  // Global mousemove: cross threshold → promote pending to active drag
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const p = pendingRef.current;
       if (!p || dragIdRef.current !== null) return;
-      const dist = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
-      if (dist < DRAG_THRESHOLD) return;
-      pendingRef.current = null;
-      const startIdx = sortedRef.current.findIndex(pr => pr.id === p.id);
-      dragIdRef.current  = p.id;
-      overIdxRef.current = startIdx;
+      if (Math.hypot(e.clientX - p.startX, e.clientY - p.startY) < DRAG_THRESHOLD) return;
+
+      pendingRef.current   = null;
+      dragIdRef.current    = p.id;
+      liveOrderRef.current = [...sortedRef.current]; // snapshot current order as baseline
       setDragId(p.id);
-      setOverIdx(startIdx);
+      setLiveOrder([...sortedRef.current]);
     };
     window.addEventListener('mousemove', onMove);
     return () => window.removeEventListener('mousemove', onMove);
   }, []);
 
-  // Global mouseup: commit drag OR let click fall through for activation
+  // Global mouseup: commit swap OR clear pending (click falls through naturally)
   useEffect(() => {
     const onUp = () => {
-      // Pending but threshold not crossed → natural click will fire, just clear
       if (pendingRef.current) {
-        pendingRef.current = null;
+        pendingRef.current = null; // threshold not crossed → let click fire
         return;
       }
       if (dragIdRef.current === null) return;
 
-      // Commit reorder
-      const cur      = sortedRef.current;
-      const fromIdx  = cur.findIndex(p => p.id === dragIdRef.current);
-      const toIdx    = overIdxRef.current ?? fromIdx;
-      if (fromIdx !== -1 && fromIdx !== toIdx) {
-        const arr = [...cur];
-        const [item] = arr.splice(fromIdx, 1);
-        arr.splice(toIdx, 0, item);
-        onReorderPresets(arr.map((p, i) => ({ ...p, order: i })));
-      }
+      const final = liveOrderRef.current;
+      const orig  = sortedRef.current;
+      const changed = final.some((p, i) => p.id !== orig[i]?.id);
+      if (changed) onReorderPresets(final.map((p, i) => ({ ...p, order: i })));
 
-      didDragRef.current = true; // suppress the click that follows mouseup
-      dragIdRef.current  = null;
-      overIdxRef.current = null;
+      didDragRef.current   = true; // suppress the click that follows mouseup
+      dragIdRef.current    = null;
+      liveOrderRef.current = [];
       setDragId(null);
-      setOverIdx(null);
+      setLiveOrder(null);
     };
     window.addEventListener('mouseup', onUp);
     return () => window.removeEventListener('mouseup', onUp);
@@ -197,9 +193,9 @@ export const PresetPanel: React.FC<Props> = ({
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#141414', overflow: 'hidden' }}>
       {/* Action buttons */}
       <div style={{ display: 'flex', gap: 2, padding: '4px 8px', borderBottom: '1px solid #222', flexShrink: 0, justifyContent: 'flex-end' }}>
-        <SvgBtn src="icons/save.svg"   title="Save Preset"     onClick={onSave} />
-        <SvgBtn src="icons/export.svg" title="Export Presets"  onClick={onExport} />
-        <SvgBtn src="icons/import.svg" title="Import Presets"  onClick={onImport} />
+        <SvgBtn src="icons/save.svg"   title="Save Preset"    onClick={onSave} />
+        <SvgBtn src="icons/export.svg" title="Export Presets" onClick={onExport} />
+        <SvgBtn src="icons/import.svg" title="Import Presets" onClick={onImport} />
         <button
           title="Settings"
           onClick={onSettings}
@@ -211,7 +207,7 @@ export const PresetPanel: React.FC<Props> = ({
 
       {/* Preset grid */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px 4px', display: 'flex', flexWrap: 'wrap', alignContent: 'flex-start', gap: 4 }}>
-        {displayPresets.map((preset, idx) => (
+        {displayPresets.map(preset => (
           <PresetCard
             key={preset.id}
             ref={el => { if (el) cardRefs.current.set(preset.id, el); else cardRefs.current.delete(preset.id); }}
@@ -225,7 +221,7 @@ export const PresetPanel: React.FC<Props> = ({
               else onLoadPreset(preset);
             }}
             onPointerDown={e => handleCardPointerDown(preset.id, e)}
-            onCardMouseEnter={() => handleCardMouseEnter(preset.id, idx)}
+            onCardMouseEnter={() => handleCardMouseEnter(preset.id)}
           />
         ))}
       </div>

@@ -127,6 +127,7 @@ const overlay: React.CSSProperties = {
   background: 'rgba(0,0,0,0.7)',
   display: 'flex', alignItems: 'center', justifyContent: 'center',
   zIndex: 200,
+  padding: 10,
 };
 
 const modal: React.CSSProperties = {
@@ -134,8 +135,11 @@ const modal: React.CSSProperties = {
   border: '1px solid #333',
   borderRadius: 6,
   padding: 24,
-  minWidth: 420,
-  maxWidth: 560,
+  width: 460,
+  maxWidth: 'calc(100vw - 20px)',
+  maxHeight: 'calc(100vh - 20px)',
+  overflowY: 'auto',
+  boxSizing: 'border-box',
   boxShadow: '0 16px 48px rgba(0,0,0,0.8)',
 };
 
