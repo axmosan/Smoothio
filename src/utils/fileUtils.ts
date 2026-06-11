@@ -101,6 +101,7 @@ function runPs(lines: string[]): string {
 }
 
 export function openFileDialog(defaultPath: string): string | null {
+  ensureDir(defaultPath);
   const result = runPs([
     'Add-Type -AssemblyName System.Windows.Forms',
     '$d = New-Object System.Windows.Forms.OpenFileDialog',

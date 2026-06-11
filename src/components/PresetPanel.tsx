@@ -181,11 +181,18 @@ export const PresetPanel: React.FC<Props> = ({
       isAltHeldRef.current = held;
       setIsAltHeld(held);
     };
+    // Reset when window loses focus — prevents stale true state when keyup is missed
+    const onBlur = () => {
+      isAltHeldRef.current = false;
+      setIsAltHeld(false);
+    };
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKey);
+    window.addEventListener('blur', onBlur);
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKey);
+      window.removeEventListener('blur', onBlur);
     };
   }, []);
 

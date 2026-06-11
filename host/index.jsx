@@ -91,22 +91,19 @@ function curveHasOvershoot(handles, midPts) {
 
 // Build one KeyframeEase pair from segment-local handle coords.
 // dv can be negative (overshoot) for non-spatial properties.
+// Handle X is clamped into AE's representable influence range [0.1%, 99.9%],
+// then speed is derived from the CLAMPED X so the handle's Y position is
+// preserved. (Previously X≈0 fell back to a fixed ±9999 speed, which with the
+// 0.1% minimum influence left the handle nearly flat — extreme curves like
+// 0,1,0,1 came out almost untouched at the start keyframe.)
 function computeEasePair(lox, loy, lix, liy, dv, dt) {
-  var outInfl = Math.max(0.1, Math.min(99.9, lox * 100));
-  var outSpd;
-  if (lox > 0.001) {
-    outSpd = (loy / lox) * (dv / dt);
-  } else {
-    outSpd = (Math.abs(dv) < 1e-10) ? 0 : (dv > 0 ? 9999 : -9999);
-  }
+  var cLox = Math.max(0.001, Math.min(0.999, lox));
+  var outInfl = cLox * 100;
+  var outSpd = (Math.abs(dv) < 1e-10) ? 0 : (loy / cLox) * (dv / dt);
 
-  var inInfl = Math.max(0.1, Math.min(99.9, (1 - lix) * 100));
-  var inSpd;
-  if (lix < 0.999) {
-    inSpd = ((1 - liy) / (1 - lix)) * (dv / dt);
-  } else {
-    inSpd = (Math.abs(dv) < 1e-10) ? 0 : (dv > 0 ? 9999 : -9999);
-  }
+  var cLix = Math.max(0.001, Math.min(0.999, lix));
+  var inInfl = (1 - cLix) * 100;
+  var inSpd = (Math.abs(dv) < 1e-10) ? 0 : ((1 - liy) / (1 - cLix)) * (dv / dt);
 
   return {
     easeOut: new KeyframeEase(outSpd, outInfl),
@@ -159,6 +156,10 @@ function applySegment(prop, kA, kB, handle, segA, segB) {
   if (!isMultiDim || isSpatial) {
     // 1D scalar or spatial (single ease covers all dimensions)
     var dv = valueDiff(vA, vB);
+    // Spatial speed is the velocity magnitude along the motion path; AE
+    // clamps negative speeds to 0 on spatial properties, which froze the
+    // start handle whenever the position moved in the negative direction.
+    if (isSpatial) dv = Math.abs(dv);
     if (Math.abs(dv) < 1e-10) dv = 0;
     var pair = computeEasePair(lox, loy, lix, liy, dv, dt);
     outEases = [pair.easeOut];
@@ -376,14 +377,22 @@ function smoothio_importEase() {
     var dv = valueDiff(prop.keyValue(kA), prop.keyValue(kB));
     if (Math.abs(dv) < 1e-6) dv = 1;
 
+    // Temporal-ease speed is signed for scalar properties (negative while the
+    // value decreases) but a positive magnitude for spatial ones. Normalize
+    // with a matching divisor, otherwise decreasing keys (e.g. separated X/Y
+    // dimensions easing downward) import with negative handle Y values.
+    var isSpatialProp = false;
+    try { isSpatialProp = prop.isSpatial; } catch (eSp) {}
+    var dvNorm = isSpatialProp ? Math.abs(dv) : dv;
+
     var outArr = prop.keyOutTemporalEase(kA);
     var inArr  = prop.keyInTemporalEase(kB);
     var eOut = outArr[0], eIn = inArr[0];
 
     var outX = eOut.influence / 100;
-    var outY = (eOut.speed * outX * dt) / Math.abs(dv);
+    var outY = (eOut.speed * outX * dt) / dvNorm;
     var inX  = 1 - eIn.influence / 100;
-    var inY  = 1 - (eIn.speed * (1 - inX) * dt) / Math.abs(dv);
+    var inY  = 1 - (eIn.speed * (1 - inX) * dt) / dvNorm;
 
     var hEntry = { out: { x: outX, y: outY } };
     hEntry['in'] = { x: inX, y: inY };
