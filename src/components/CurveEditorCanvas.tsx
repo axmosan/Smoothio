@@ -21,6 +21,15 @@ const PADDING = 20;
 // Minimum X range to always keep [0,1] visible with ~15% padding on each side
 const X_RANGE_MIN = 1.3;
 
+// Ease handles are constrained in X to their segment's anchor range
+// (Y is intentionally unconstrained; midpoints are exempt from both).
+function clampHandleX(curve: CurveData, segIndex: number, p: Point): Point {
+  const anchors = getAnchorPoints(curve);
+  const lo = Math.min(anchors[segIndex].x, anchors[segIndex + 1].x);
+  const hi = Math.max(anchors[segIndex].x, anchors[segIndex + 1].x);
+  return { x: Math.min(Math.max(p.x, lo), hi), y: p.y };
+}
+
 function computeTargetViewY(curve: CurveData): { min: number; max: number } {
   let minY = 0, maxY = 1;
   for (const h of curve.handles) {
@@ -191,8 +200,8 @@ export const CurveEditorCanvas: React.FC<Props> = ({
     }
 
     const nearest = findNearestHandle(svgPos);
-    if (!nearest) return;
-    const cursorNorm = fromSvg(svgPos);
+    if (!nearest || nearest.type === 'midpoint') return;
+    const cursorNorm = clampHandleX(curve, nearest.segIndex, fromSvg(svgPos));
     const next = JSON.parse(JSON.stringify(curve)) as CurveData;
     if (nearest.type === 'handleOut') next.handles[nearest.segIndex].out = cursorNorm;
     else if (nearest.type === 'handleIn') next.handles[nearest.segIndex].in = cursorNorm;
@@ -214,8 +223,8 @@ export const CurveEditorCanvas: React.FC<Props> = ({
       const next = JSON.parse(JSON.stringify(curve)) as CurveData;
       const { target } = drag;
       if (target.type === 'midpoint')    next.midPoints[target.index]         = newVal;
-      else if (target.type === 'handleOut') next.handles[target.segIndex].out = newVal;
-      else                                  next.handles[target.segIndex].in  = newVal;
+      else if (target.type === 'handleOut') next.handles[target.segIndex].out = clampHandleX(next, target.segIndex, newVal);
+      else                                  next.handles[target.segIndex].in  = clampHandleX(next, target.segIndex, newVal);
       onChange(next);
     };
     const onUp = () => { setDrag(null); dragScaleRef.current = null; };
