@@ -40,6 +40,22 @@ function allKeys(prop) {
   return out;
 }
 
+function layerHasSelectedKeys(layer) {
+  var found = false;
+  walkProps(layer, function (prop) {
+    if (!found && selKeys(prop).length > 0) found = true;
+  });
+  return found;
+}
+
+// Is this property a target of the ease? Mirrors the target-collection logic in
+// smoothio_applyEasing: when anything on the layer has selected keys we ease only
+// those; otherwise we fall back to every property with >= 2 keys.
+function isEaseTarget(prop, anySelectedOnLayer) {
+  if (anySelectedOnLayer) return selKeys(prop).length > 0;
+  return prop.numKeys >= 2;
+}
+
 function valueDiff(va, vb) {
   if (typeof va === 'number') return vb - va;
   if (va && va.length) {
@@ -283,9 +299,21 @@ function smoothio_applyEasing(curveData, separateDim) {
     for (var li = 0; li < comp.selectedLayers.length; li++) {
       var layer = comp.selectedLayers[li];
 
+      // Dimension separation — only ever applied to the properties actually being
+      // eased (the targets), never to unrelated properties on the layer:
+      //  - manual `separate` toggle: separate the eased target props.
+      //  - `hasOvershoot` auto: only spatial props (Position) need separating, because
+      //    AE clamps negative speed on spatial properties. Non-spatial multi-dim props
+      //    (Scale, etc.) already get overshoot via per-dimension eases in applySegment,
+      //    so easing Scale with overshoot must NOT separate an unrelated Position. (Issue #2)
       if (separate || hasOvershoot) {
+        var anySel = layerHasSelectedKeys(layer);
         walkProps(layer, function (prop) {
-          if (prop.dimensionsSeparated !== undefined && !prop.dimensionsSeparated) {
+          if (prop.dimensionsSeparated === undefined || prop.dimensionsSeparated) return;
+          if (!isEaseTarget(prop, anySel)) return;
+          var spatial = false;
+          try { spatial = prop.isSpatial; } catch (e) {}
+          if (separate || (hasOvershoot && spatial)) {
             try { prop.dimensionsSeparated = true; } catch (e) {}
           }
         });
