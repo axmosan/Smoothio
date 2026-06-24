@@ -16,7 +16,7 @@ import {
   removeMidPoint,
   textBoxesToCurve,
 } from './utils/curveUtils';
-import { callHost, isInCEP } from './utils/cepBridge';
+import { callHost, isInCEP, requestOpenExtension } from './utils/cepBridge';
 import {
   autoSaveToCanonical,
   basename,
@@ -26,8 +26,12 @@ import {
   mergePresets,
   openFileDialog,
   openSaveDialog,
+  readSettingsFile,
   savePresetsToFile,
+  writeSettingsFile,
 } from './utils/fileUtils';
+
+const SETTINGS_EXTENSION_ID = 'com.smoothio.settings';
 
 const STORAGE_PRESETS = 'smoothio_presets';
 const STORAGE_SETTINGS = 'smoothio_settings';
@@ -36,9 +40,14 @@ const STORAGE_CURVE_SYNC = 'smoothio_curve_sync';
 const DEFAULT_SETTINGS: AppSettings = {
   presetSize: 60,
   presetSaveLocation: getDefaultSaveLocation(),
+  uiLayout: 'auto',
 };
 
 function loadSettings(): AppSettings {
+  // Prefer the shared settings file (kept in sync with the Settings window in CEP),
+  // fall back to localStorage for browser/dev.
+  const f = readSettingsFile();
+  if (f) return { ...DEFAULT_SETTINGS, ...f.settings };
   try { const r = localStorage.getItem(STORAGE_SETTINGS); if (r) return { ...DEFAULT_SETTINGS, ...JSON.parse(r) }; } catch {}
   return { ...DEFAULT_SETTINGS };
 }
@@ -69,11 +78,14 @@ export const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [dividerPos, setDividerPos] = useState(0.68);
   const [status, setStatus] = useState('');
+  // Reflow presets below the graph when the panel gets tall: height:width past 3:2.
+  const [isVertical, setIsVertical] = useState(false);
 
-  const dividerRef   = useRef<{ startX: number; startPos: number } | null>(null);
+  const dividerRef   = useRef<{ startX: number; startY: number; startPos: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const popoutRef    = useRef<Window | null>(null);
   const didMountRef  = useRef(false);
+  const lastSettingsTsRef = useRef(0); // last settings.json ts this panel wrote/applied
 
   // Auto-persist to localStorage + canonical file on every presets change (skip first render)
   useEffect(() => {
@@ -204,30 +216,84 @@ export const App: React.FC = () => {
 
   const handleImportCancel = () => setPendingImport(null);
 
-  const handleSaveSettings = (s: AppSettings) => { setSettings(s); saveSettings(s); };
+  const handleSaveSettings = (s: AppSettings) => {
+    setSettings(s);
+    saveSettings(s);
+    lastSettingsTsRef.current = writeSettingsFile(s, null);
+  };
   const handleDeleteAllPresets = () => { setPresets([]); };
+
+  // Open the separate Settings window (CEP). Seed the shared file first so the
+  // window loads the current values; fall back to the in-panel dialog otherwise.
+  const handleOpenSettings = () => {
+    if (isInCEP()) {
+      lastSettingsTsRef.current = writeSettingsFile(settings, null);
+      if (requestOpenExtension(SETTINGS_EXTENSION_ID)) return;
+    }
+    setShowSettings(true);
+  };
+
+  // Poll the shared settings file for changes made by the Settings window.
+  useEffect(() => {
+    if (!isInCEP()) return;
+    lastSettingsTsRef.current = readSettingsFile()?.ts ?? 0; // baseline: only react to future writes
+    const id = window.setInterval(() => {
+      const f = readSettingsFile();
+      if (!f || f.ts === lastSettingsTsRef.current) return;
+      lastSettingsTsRef.current = f.ts;
+      const merged = { ...DEFAULT_SETTINGS, ...f.settings };
+      setSettings(merged);
+      saveSettings(merged);
+      if (f.command === 'deleteAllPresets') {
+        setPresets([]);
+        // Clear the command so it runs once; record the new ts to ignore our own write.
+        lastSettingsTsRef.current = writeSettingsFile(f.settings, null);
+      }
+    }, 1500);
+    return () => window.clearInterval(id);
+  }, []);
 
   const handleReorderPresets = useCallback((reordered: Preset[]) => {
     setPresets(reordered);
   }, []);
 
-  // Divider drag
+  // Track container aspect ratio → choose horizontal (presets right) vs vertical
+  // (presets below) layout. Threshold: height:width crossing 3:2 (1.5).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      if (width > 0 && height > 0) setIsVertical(height / width > 1.5);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Effective layout: settings override wins, otherwise follow auto detection.
+  const vertical = settings.uiLayout === 'vertical' ? true
+    : settings.uiLayout === 'horizontal' ? false
+    : isVertical;
+
+  // Divider drag — drives the graph section's size fraction along the layout axis.
   const onDividerMouseDown = (e: React.MouseEvent) => {
-    dividerRef.current = { startX: e.clientX, startPos: dividerPos };
+    dividerRef.current = { startX: e.clientX, startY: e.clientY, startPos: dividerPos };
     e.preventDefault();
   };
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (!dividerRef.current || !containerRef.current) return;
-      const totalW = containerRef.current.offsetWidth;
-      const dx = e.clientX - dividerRef.current.startX;
-      setDividerPos(Math.max(0.3, Math.min(0.82, dividerRef.current.startPos + dx / totalW)));
+      const d = dividerRef.current;
+      const delta = vertical
+        ? (e.clientY - d.startY) / containerRef.current.offsetHeight
+        : (e.clientX - d.startX) / containerRef.current.offsetWidth;
+      setDividerPos(Math.max(0.3, Math.min(0.82, d.startPos + delta)));
     };
     const onUp = () => { dividerRef.current = null; };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-  }, []);
+  }, [vertical]);
 
   return (
     <div
@@ -235,6 +301,7 @@ export const App: React.FC = () => {
       style={{
         width: '100%', height: '100%',
         display: 'flex',
+        flexDirection: vertical ? 'column' : 'row',
         background: '#141414',
         color: '#e0e0e0',
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -243,14 +310,16 @@ export const App: React.FC = () => {
         position: 'relative',
       }}
     >
-      {/* Left panel */}
+      {/* Graph section (presets sit to the right, or below when tall) */}
       <div
         style={{
-          width: `${dividerPos * 100}%`,
           display: 'flex',
           flexDirection: 'column',
           flexShrink: 0,
           overflow: 'hidden',
+          ...(vertical
+            ? { height: `${dividerPos * 100}%` }
+            : { width: `${dividerPos * 100}%` }),
         }}
       >
         {/* Graph fills all available space above the controls */}
@@ -326,18 +395,21 @@ export const App: React.FC = () => {
       <div
         onMouseDown={onDividerMouseDown}
         style={{
-          width: 6, background: '#1a1a1a', cursor: 'col-resize',
+          background: '#1a1a1a',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          flexShrink: 0, borderLeft: '1px solid #222', borderRight: '1px solid #222',
+          flexShrink: 0,
+          ...(vertical
+            ? { height: 6, width: '100%', cursor: 'row-resize', borderTop: '1px solid #222', borderBottom: '1px solid #222' }
+            : { width: 6, height: '100%', cursor: 'col-resize', borderLeft: '1px solid #222', borderRight: '1px solid #222' }),
         }}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <div style={{ display: 'flex', flexDirection: vertical ? 'row' : 'column', gap: 3 }}>
           {[0, 1, 2].map(i => <div key={i} style={{ width: 3, height: 3, borderRadius: '50%', background: '#444' }} />)}
         </div>
       </div>
 
-      {/* Right panel */}
-      <div style={{ flex: 1, overflow: 'hidden' }}>
+      {/* Preset section */}
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
         <PresetPanel
           presets={presets}
           presetSize={settings.presetSize}
@@ -346,7 +418,7 @@ export const App: React.FC = () => {
           onSave={() => setShowSave(true)}
           onExport={handleExport}
           onImport={handleImportFile}
-          onSettings={() => setShowSettings(true)}
+          onSettings={handleOpenSettings}
           onReorderPresets={handleReorderPresets}
         />
       </div>

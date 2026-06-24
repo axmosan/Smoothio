@@ -9,6 +9,7 @@ module.exports = (env, argv) => {
     entry: {
       main: './src/index.tsx',
       popout: './src/popout.tsx',
+      settings: './src/settings.tsx',
     },
     output: {
       path: path.resolve(__dirname),
@@ -36,6 +37,12 @@ module.exports = (env, argv) => {
         template: './public/popout.html',
         filename: 'popout.html',
         chunks: ['popout'],
+        inject: 'body',
+      }),
+      new HtmlWebpackPlugin({
+        template: './public/settings.html',
+        filename: 'settings.html',
+        chunks: ['settings'],
         inject: 'body',
       }),
       new MiniCssExtractPlugin({ filename: 'dist/styles.css' }),

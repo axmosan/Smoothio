@@ -17,9 +17,10 @@ interface Props {
 const ANCHOR_R = 6;
 const HANDLE_R = 4;
 const HIT_R = 10;
-const PADDING = 20;
-// Minimum X range to always keep [0,1] visible with ~15% padding on each side
-const X_RANGE_MIN = 1.3;
+const PADDING = 12;
+// Target X range when [0,1] is the binding constraint: show 0..1 with just a ~2%
+// pad on each side (≈1.04×), center-scaled, so the curve nearly fills the box.
+const X_RANGE_MIN = 1.04;
 
 // Ease handles are constrained in X to their segment's anchor range
 // (Y is intentionally unconstrained; midpoints are exempt from both).
@@ -41,7 +42,7 @@ function computeTargetViewY(curve: CurveData): { min: number; max: number } {
     maxY = Math.max(maxY, mp.y);
   }
   const range = maxY - minY;
-  const pad = Math.max(range * 0.15, 0.05);
+  const pad = Math.max(range * 0.02, 0.02);
   return { min: minY - pad, max: maxY + pad };
 }
 
@@ -113,9 +114,9 @@ export const CurveEditorCanvas: React.FC<Props> = ({
     ? Math.min(graphH / viewYRange, graphW / X_RANGE_MIN)
     : 1;
 
-  // Derived visible extents
+  // Derived visible extents — always center-scaled on both axes.
   const viewXRange = graphW / scale;
-  const viewXMin   = 0.5 - viewXRange / 2;          // always centered at x=0.5
+  const viewXMin   = 0.5 - viewXRange / 2;
   const viewYDisp  = graphH / scale;
   const viewYMin   = (viewY.min + viewY.max) / 2 - viewYDisp / 2; // centered on handle range
 

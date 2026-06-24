@@ -1,5 +1,11 @@
 import React, { useState } from 'react';
-import { AppSettings } from '../types';
+import { AppSettings, UILayout } from '../types';
+
+const LAYOUT_OPTIONS: { value: UILayout; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'vertical', label: 'Vertical' },
+  { value: 'horizontal', label: 'Horizontal' },
+];
 
 interface Props {
   settings: AppSettings;
@@ -69,6 +75,42 @@ export const SettingsDialog: React.FC<Props> = ({
               boxSizing: 'border-box',
             }}
           />
+        </div>
+
+        <div style={{ borderTop: '1px solid #2a2a2a', marginBottom: 20 }} />
+
+        {/* UI Layout */}
+        <div style={{ marginBottom: 24 }}>
+          <label style={{ color: '#ccc', fontSize: 14, display: 'block', marginBottom: 8 }}>
+            UI Layout
+          </label>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {LAYOUT_OPTIONS.map(opt => {
+              const active = local.uiLayout === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  onClick={() => setLocal({ ...local, uiLayout: opt.value })}
+                  style={{
+                    flex: 1,
+                    background: active ? '#0077ff' : '#2a2a2a',
+                    border: `1px solid ${active ? '#0077ff' : '#333'}`,
+                    borderRadius: 4,
+                    color: active ? '#fff' : '#bbb',
+                    padding: '7px 0',
+                    cursor: 'pointer',
+                    fontSize: 13,
+                    fontWeight: active ? 600 : 400,
+                  }}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ color: '#666', fontSize: 11, marginTop: 6 }}>
+            Auto: switch by window shape · Vertical / Horizontal: force a layout
+          </div>
         </div>
 
         <div style={{ borderTop: '1px solid #2a2a2a', marginBottom: 20 }} />

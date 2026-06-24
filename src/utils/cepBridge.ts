@@ -1,7 +1,10 @@
 declare global {
   interface Window {
     CSInterface?: new () => { evalScript(s: string, cb: (r: string) => void): void };
-    __adobe_cep__?: { evalScript(s: string, cb: (r: string) => void): void };
+    __adobe_cep__?: {
+      evalScript(s: string, cb: (r: string) => void): void;
+      requestOpenExtension?(id: string, params: string): void;
+    };
   }
 }
 
@@ -21,6 +24,15 @@ function getCS() {
 
 export function isInCEP(): boolean {
   return !!(window.CSInterface || window.__adobe_cep__);
+}
+
+/** Open another extension from this bundle (e.g. the Settings window). */
+export function requestOpenExtension(id: string): boolean {
+  const cep = window.__adobe_cep__;
+  if (cep && typeof cep.requestOpenExtension === 'function') {
+    try { cep.requestOpenExtension(id, ''); return true; } catch { /**/ }
+  }
+  return false;
 }
 
 export function evalScript(script: string): Promise<string> {

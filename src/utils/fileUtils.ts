@@ -1,4 +1,4 @@
-import { ExportedPresets, ImportMode, Preset } from '../types';
+import { AppSettings, ExportedPresets, ImportMode, Preset } from '../types';
 
 declare function require(mod: string): unknown;
 
@@ -78,6 +78,53 @@ export function loadPresetsFromFile(
 
 export function loadPresetsFromCanonical(): { ok: boolean; data?: ExportedPresets } {
   return loadPresetsFromFile(getCanonicalPresetsPath());
+}
+
+// ── Settings file (shared between the panel and the separate Settings window) ──
+// CEP extensions don't share localStorage, so settings are exchanged through this
+// JSON file. `ts` lets each side detect changes made by the other; `command` lets
+// the Settings window ask the panel to run an action it can't do itself.
+
+export type SettingsCommand = 'deleteAllPresets' | null;
+
+export interface SettingsFile {
+  settings: AppSettings;
+  command: SettingsCommand;
+  ts: number;
+}
+
+export function getCanonicalSettingsPath(): string {
+  try {
+    const os = getOs(); const path = getPath();
+    if (os && path) return path.join(os.homedir(), 'Documents', 'Smoothio', 'settings.json');
+  } catch {}
+  return 'C:\\Users\\User\\Documents\\Smoothio\\settings.json';
+}
+
+/** Write the settings file with a fresh timestamp; returns that ts (or 0 if no fs). */
+export function writeSettingsFile(settings: AppSettings, command: SettingsCommand = null): number {
+  const fs = getFs(); const path = getPath();
+  const ts = Date.now();
+  if (!fs || !path) return ts;
+  try {
+    const p = getCanonicalSettingsPath();
+    const dir = path.dirname(p);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const data: SettingsFile = { settings, command, ts };
+    fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
+  } catch {}
+  return ts;
+}
+
+export function readSettingsFile(): SettingsFile | null {
+  const fs = getFs();
+  if (!fs) return null;
+  try {
+    const raw = fs.readFileSync(getCanonicalSettingsPath(), 'utf-8');
+    const d = JSON.parse(raw) as SettingsFile;
+    if (d && d.settings && typeof d.ts === 'number') return d;
+  } catch {}
+  return null;
 }
 
 // ── PowerShell dialogs ────────────────────────────────────────────────────────

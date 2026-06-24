@@ -3,11 +3,12 @@
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   ExtensionBundleId="com.smoothio"
   ExtensionBundleName="Smoothio"
-  ExtensionBundleVersion="1.0.1"
+  ExtensionBundleVersion="1.0.5"
   Version="12.0">
 
   <ExtensionList>
-    <Extension Id="com.smoothio.panel" Version="1.0.1"/>
+    <Extension Id="com.smoothio.panel" Version="1.0.5"/>
+    <Extension Id="com.smoothio.settings" Version="1.0.5"/>
   </ExtensionList>
 
   <ExecutionEnvironment>
@@ -49,6 +50,40 @@
             <MinSize>
               <Height>480</Height>
               <Width>380</Width>
+            </MinSize>
+          </Geometry>
+          <Icons/>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+
+    <!-- Settings window: Modeless + no <Menu> → not listed under Window/Extensions,
+         opened programmatically from the panel via requestOpenExtension. -->
+    <Extension Id="com.smoothio.settings">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./settings.html</MainPath>
+          <ScriptPath>./host/index.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--mixed-context</Parameter>
+            <Parameter>--allow-file-access</Parameter>
+            <Parameter>--allow-file-access-from-files</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Modeless</Type>
+          <Geometry>
+            <Size>
+              <Height>560</Height>
+              <Width>460</Width>
+            </Size>
+            <MinSize>
+              <Height>420</Height>
+              <Width>360</Width>
             </MinSize>
           </Geometry>
           <Icons/>

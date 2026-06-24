@@ -21,9 +21,12 @@ export interface Preset {
   order: number;
 }
 
+export type UILayout = 'auto' | 'vertical' | 'horizontal';
+
 export interface AppSettings {
   presetSize: number;
   presetSaveLocation: string;
+  uiLayout: UILayout;
 }
 
 export type ImportMode = 'skip' | 'overwrite' | 'overwriteAll';
