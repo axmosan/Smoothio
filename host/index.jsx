@@ -56,6 +56,19 @@ function isEaseTarget(prop, anySelectedOnLayer) {
   return prop.numKeys >= 2;
 }
 
+// Resolve key indices on `prop` whose time matches any in `times`. Used to re-find
+// the user's selected keyframes after dimension separation clears the selection.
+function keysAtTimes(prop, times) {
+  var out = [];
+  for (var k = 1; k <= prop.numKeys; k++) {
+    var t = prop.keyTime(k);
+    for (var i = 0; i < times.length; i++) {
+      if (Math.abs(t - times[i]) < 0.001) { out.push(k); break; }
+    }
+  }
+  return out;
+}
+
 function valueDiff(va, vb) {
   if (typeof va === 'number') return vb - va;
   if (va && va.length) {
@@ -276,6 +289,56 @@ function applyToKeys(prop, keyIdxArr, midPoints, handles) {
   }
 }
 
+// Snapshot every existing segment ease on `prop` as a normalized handle (one entry
+// per keyframe pair, keyed by time). Used to preserve eases across a dimension
+// separation, which otherwise flattens the new follower properties to linear.
+// The normalized form is dimension-independent, so restoring it onto each follower
+// reproduces the correct per-axis speed. (Issue #4 follow-up.)
+function snapshotSegmentEases(prop) {
+  var segs = [];
+  var isSp = false; try { isSp = prop.isSpatial; } catch (e0) {}
+  for (var k = 1; k < prop.numKeys; k++) {
+    try {
+      var kA = k, kB = k + 1;
+      var tA = prop.keyTime(kA), tB = prop.keyTime(kB);
+      var dt = tB - tA;
+      if (dt <= 0) continue;
+
+      var isLinear = (prop.keyOutInterpolationType(kA) === KeyframeInterpolationType.LINEAR &&
+                      prop.keyInInterpolationType(kB)  === KeyframeInterpolationType.LINEAR);
+
+      var dv = valueDiff(prop.keyValue(kA), prop.keyValue(kB));
+      if (Math.abs(dv) < 1e-6) dv = 1;
+      var dvNorm = isSp ? Math.abs(dv) : dv;
+
+      var eOut = prop.keyOutTemporalEase(kA)[0];
+      var eIn  = prop.keyInTemporalEase(kB)[0];
+
+      var outX = eOut.influence / 100;
+      var outY = (eOut.speed * outX * dt) / dvNorm;
+      var inX  = 1 - eIn.influence / 100;
+      var inY  = 1 - (eIn.speed * (1 - inX) * dt) / dvNorm;
+
+      var handle = { out: { x: outX, y: outY } };
+      handle['in'] = { x: inX, y: inY };
+      segs.push({ tA: tA, tB: tB, handle: handle, linear: isLinear });
+    } catch (e) {}
+  }
+  return segs;
+}
+
+// Re-apply snapshotted segment eases onto `prop` (e.g. a separation follower),
+// matching segments by keyframe time. Linear segments are left as-is.
+function restoreSegmentEases(prop, segs) {
+  for (var s = 0; s < segs.length; s++) {
+    if (segs[s].linear) continue;
+    var kA = findKeyAtTime(prop, segs[s].tA);
+    var kB = findKeyAtTime(prop, segs[s].tB);
+    if (kA < 0 || kB < 0) continue;
+    applySegment(prop, kA, kB, segs[s].handle, { x: 0, y: 0 }, { x: 1, y: 1 });
+  }
+}
+
 
 // ─── Public functions (called from React via evalScript) ──────────────────────
 
@@ -299,43 +362,86 @@ function smoothio_applyEasing(curveData, separateDim) {
     for (var li = 0; li < comp.selectedLayers.length; li++) {
       var layer = comp.selectedLayers[li];
 
-      // Dimension separation — only ever applied to the properties actually being
-      // eased (the targets), never to unrelated properties on the layer:
-      //  - manual `separate` toggle: separate the eased target props.
-      //  - `hasOvershoot` auto: only spatial props (Position) need separating, because
-      //    AE clamps negative speed on spatial properties. Non-spatial multi-dim props
-      //    (Scale, etc.) already get overshoot via per-dimension eases in applySegment,
-      //    so easing Scale with overshoot must NOT separate an unrelated Position. (Issue #2)
-      if (separate || hasOvershoot) {
-        var anySel = layerHasSelectedKeys(layer);
-        walkProps(layer, function (prop) {
-          if (prop.dimensionsSeparated === undefined || prop.dimensionsSeparated) return;
-          if (!isEaseTarget(prop, anySel)) return;
-          var spatial = false;
-          try { spatial = prop.isSpatial; } catch (e) {}
-          if (separate || (hasOvershoot && spatial)) {
-            try { prop.dimensionsSeparated = true; } catch (e) {}
-          }
-        });
-      }
+      // Capture target intent BEFORE any dimension separation. Separating a
+      // property moves its animation onto new follower properties and clears the
+      // keyframe SELECTION, so we record each target's selected keyframe *times*
+      // now (while the selection is valid) and re-resolve key indices by time
+      // after separation.
+      //
+      // Issue #4: previously we separated first, then collected targets from the
+      // (now-empty) selection — which fell back to *all* keyframes. A 3-point ease
+      // on a sub-range then took the multi-pair direct-apply path, inserting no
+      // midpoints and overwriting the surrounding animation.
+      //
+      // Separation rules (Issue #2): only target properties are ever separated;
+      // the overshoot auto-trigger separates spatial props (Position) only, since
+      // non-spatial multi-dim props (Scale) get overshoot via per-dimension eases.
+      var anySel = layerHasSelectedKeys(layer);
 
-      var targetProps = [];
+      var targets = []; // { prop, times, sep, dims }
       walkProps(layer, function (prop) {
         if (prop.numKeys < 1) return;
-        var sk = selKeys(prop);
-        if (sk.length > 0) targetProps.push({ prop: prop, keys: sk });
+        if (!isEaseTarget(prop, anySel)) return;
+
+        var keysForProp = anySel ? selKeys(prop) : allKeys(prop);
+        if (keysForProp.length === 0) return;
+
+        var times = [];
+        for (var z = 0; z < keysForProp.length; z++) times.push(prop.keyTime(keysForProp[z]));
+
+        // Decide separation for this target. Only a currently-combined multi-dim
+        // property can be separated (skips 1D props and existing followers).
+        var wantSep = false, dims = 0, canSep = false;
+        try {
+          canSep = (prop.dimensionsSeparated === false) &&
+                   (typeof prop.value === 'object') && prop.value && prop.value.length >= 2;
+        } catch (eC) {}
+        if (canSep) {
+          var spatial = false;
+          try { spatial = prop.isSpatial; } catch (eS) {}
+          if (separate || (hasOvershoot && spatial)) { wantSep = true; dims = prop.value.length; }
+        }
+
+        // Snapshot existing eases before separating, so segments outside the eased
+        // range aren't flattened to linear by the separation. (Issue #4 follow-up)
+        var snap = wantSep ? snapshotSegmentEases(prop) : null;
+
+        targets.push({ prop: prop, times: times, sep: wantSep, dims: dims, snap: snap });
       });
 
-      if (targetProps.length === 0) {
-        walkProps(layer, function (prop) {
-          if (prop.numKeys >= 2) targetProps.push({ prop: prop, keys: allKeys(prop) });
-        });
+      // Perform all separations first (separating one property never affects
+      // another's followers).
+      for (var ti = 0; ti < targets.length; ti++) {
+        if (targets[ti].sep) {
+          try { targets[ti].prop.dimensionsSeparated = true; } catch (eSep) {}
+        }
       }
 
-      for (var pi = 0; pi < targetProps.length; pi++) {
-        var info = targetProps[pi];
-        applyToKeys(info.prop, info.keys, midPts, handles);
-        count++;
+      // Resolve each target to its animatable leaf properties (itself, or its
+      // separation followers) and apply, matching the captured keyframe times.
+      for (var ti2 = 0; ti2 < targets.length; ti2++) {
+        var tg = targets[ti2];
+        var leaves = [];
+        if (tg.sep && tg.prop.dimensionsSeparated) {
+          for (var d = 0; d < tg.dims; d++) {
+            var f = null;
+            try { f = tg.prop.getSeparationFollower(d); } catch (eF) {}
+            if (f) leaves.push(f);
+          }
+        } else {
+          leaves.push(tg.prop);
+        }
+
+        for (var lf = 0; lf < leaves.length; lf++) {
+          var leaf = leaves[lf];
+          // Restore the pre-separation eases that separation flattened, then apply
+          // the new ease only to the selected range (it overwrites those segments).
+          if (tg.sep && tg.snap) restoreSegmentEases(leaf, tg.snap);
+          var keyIdx = keysAtTimes(leaf, tg.times);
+          if (keyIdx.length === 0) continue;
+          applyToKeys(leaf, keyIdx, midPts, handles);
+          count++;
+        }
       }
     }
 
@@ -395,8 +501,33 @@ function smoothio_importEase() {
 
   var prop = found;
   var sk = selKeys(prop);
-  var handles = [];
 
+  var isSpatialProp = false;
+  try { isSpatialProp = prop.isSpatial; } catch (eSp) {}
+
+  // Whole-selection extents, used to normalize each keyframe into global canvas
+  // [0,1] space. Endpoints are pinned to exactly (0,0) and (1,1); interior
+  // keyframes become the midpoint anchors. Handles are extracted per segment in
+  // segment-local space, then mapped back to global space below — the inverse of
+  // the global→local transform applySegment applies. Without this mapping, a
+  // multi-segment (3+ point) ease imported its handles in the wrong space, so
+  // only single-segment (2-point) eases came back correctly. (Issue #3)
+  var tA0 = prop.keyTime(sk[0]);
+  var tB0 = prop.keyTime(sk[sk.length - 1]);
+  var vA0 = prop.keyValue(sk[0]);
+  var vB0 = prop.keyValue(sk[sk.length - 1]);
+  var totalDt = tB0 - tA0;
+  var totalDv = valueDiff(vA0, vB0);
+
+  var anchors = [{ x: 0, y: 0 }];
+  for (var a = 1; a < sk.length - 1; a++) {
+    var ax = (totalDt > 0) ? (prop.keyTime(sk[a]) - tA0) / totalDt : 0;
+    var ay = (Math.abs(totalDv) > 1e-6) ? valueDiff(vA0, prop.keyValue(sk[a])) / totalDv : 0.5;
+    anchors.push({ x: ax, y: ay });
+  }
+  anchors.push({ x: 1, y: 1 });
+
+  var handles = [];
   for (var i = 0; i < sk.length - 1; i++) {
     var kA = sk[i], kB = sk[i + 1];
     var dt = prop.keyTime(kB) - prop.keyTime(kA);
@@ -409,18 +540,34 @@ function smoothio_importEase() {
     // value decreases) but a positive magnitude for spatial ones. Normalize
     // with a matching divisor, otherwise decreasing keys (e.g. separated X/Y
     // dimensions easing downward) import with negative handle Y values.
-    var isSpatialProp = false;
-    try { isSpatialProp = prop.isSpatial; } catch (eSp) {}
     var dvNorm = isSpatialProp ? Math.abs(dv) : dv;
 
     var outArr = prop.keyOutTemporalEase(kA);
     var inArr  = prop.keyInTemporalEase(kB);
     var eOut = outArr[0], eIn = inArr[0];
 
-    var outX = eOut.influence / 100;
-    var outY = (eOut.speed * outX * dt) / dvNorm;
-    var inX  = 1 - eIn.influence / 100;
-    var inY  = 1 - (eIn.speed * (1 - inX) * dt) / dvNorm;
+    // Segment-local handle coords (relative to this segment's own [0,1] box)
+    var outXl = eOut.influence / 100;
+    var outYl = (eOut.speed * outXl * dt) / dvNorm;
+    var inXl  = 1 - eIn.influence / 100;
+    var inYl  = 1 - (eIn.speed * (1 - inXl) * dt) / dvNorm;
+
+    // Map segment-local → global using this segment's anchors. A degenerate
+    // (flat) sub-segment mirrors applySegment's fallback of treating handle
+    // coords as already-global, so leave them untransformed there.
+    var A = anchors[i], B = anchors[i + 1];
+    var gdx = B.x - A.x;
+    var gdy = B.y - A.y;
+    var outX, outY, inX, inY;
+    if (Math.abs(gdx) < 1e-10 || Math.abs(gdy) < 1e-10) {
+      outX = outXl; outY = outYl;
+      inX  = inXl;  inY  = inYl;
+    } else {
+      outX = A.x + outXl * gdx;
+      outY = A.y + outYl * gdy;
+      inX  = A.x + inXl  * gdx;
+      inY  = A.y + inYl  * gdy;
+    }
 
     var hEntry = { out: { x: outX, y: outY } };
     hEntry['in'] = { x: inX, y: inY };
@@ -431,17 +578,7 @@ function smoothio_importEase() {
 
   var midPoints = [];
   for (var j = 1; j < sk.length - 1; j++) {
-    var kM = sk[j];
-    var tA0 = prop.keyTime(sk[0]);
-    var tB0 = prop.keyTime(sk[sk.length - 1]);
-    var tM  = prop.keyTime(kM);
-    var mx  = (tM - tA0) / (tB0 - tA0);
-    var vA0 = prop.keyValue(sk[0]);
-    var vB0 = prop.keyValue(sk[sk.length - 1]);
-    var vM  = prop.keyValue(kM);
-    var totalDv = valueDiff(vA0, vB0);
-    var my = (Math.abs(totalDv) > 1e-6) ? valueDiff(vA0, vM) / totalDv : 0.5;
-    midPoints.push({ x: mx, y: my });
+    midPoints.push({ x: anchors[j].x, y: anchors[j].y });
   }
 
   return JSON.stringify({ ok: true, curve: { midPoints: midPoints, handles: handles } });
