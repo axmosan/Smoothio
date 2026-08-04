@@ -2,7 +2,7 @@
 
 A custom easing panel for After Effects.
 
-The graph editor gives you two handles per keyframe and nothing else. Smoothio replaces that with a curve editor you can add points to, save as a preset, and apply to any selection — the same easing, reused across a project instead of redrawn by hand.
+This is a versatile easing script that can be used in any production, featuring capabilities such as creating easing graphs with three or more intermediate points and importing graphs from existing keyframes into the panel.
 
 ## Features
 
