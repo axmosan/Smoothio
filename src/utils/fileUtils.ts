@@ -1,4 +1,5 @@
 import { AppSettings, ExportedPresets, ImportMode, Preset } from '../types';
+import { callHost, isInCEP } from './cepBridge';
 
 declare function require(mod: string): unknown;
 
@@ -111,9 +112,36 @@ export function writeSettingsFile(settings: AppSettings, command: SettingsComman
     const dir = path.dirname(p);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const data: SettingsFile = { settings, command, ts };
-    fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
+    // Write-then-rename: the other window watches this file, and a rename is
+    // atomic on the same volume, so a reader can never catch a half-written file.
+    const tmp = `${p}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
+    fs.renameSync(tmp, p);
   } catch {}
   return ts;
+}
+
+/**
+ * Call `onChange` whenever settings.json is written by the other window.
+ * Returns a disposer, or null when watching isn't available (caller should poll).
+ * The containing directory is watched rather than the file itself so the watch
+ * survives the write-then-rename above and works before the file exists.
+ */
+export function watchSettingsFile(onChange: () => void): (() => void) | null {
+  const fs = getFs(); const path = getPath();
+  if (!fs || !path) return null;
+  try {
+    const p = getCanonicalSettingsPath();
+    const dir = path.dirname(p);
+    const name = path.basename(p);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const w = fs.watch(dir, (_event: unknown, filename: unknown) => {
+      if (!filename || String(filename) === name) onChange();
+    });
+    return () => { try { w.close(); } catch {} };
+  } catch {
+    return null;
+  }
 }
 
 export function readSettingsFile(): SettingsFile | null {
@@ -127,7 +155,18 @@ export function readSettingsFile(): SettingsFile | null {
   return null;
 }
 
-// ── PowerShell dialogs ────────────────────────────────────────────────────────
+// ── File dialogs ──────────────────────────────────────────────────────────────
+// Preferred path: ask the host (ExtendScript) to show the dialog. That is the
+// standard Explorer dialog, it needs no child process, and evalScript is async
+// so the panel keeps painting while the dialog is open.
+// Fallback: a PowerShell WinForms dialog — same Explorer look, but it costs a
+// process launch (~0.3–1s) and blocks the panel until the dialog closes, so it
+// is only used when there is no host to ask (browser/dev).
+
+/** Quote a string as a PowerShell single-quoted literal (no expansion inside). */
+function psQuote(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`;
+}
 
 /** Execute a PowerShell script written to a temp file; returns stdout trimmed. */
 function runPs(lines: string[]): string {
@@ -138,7 +177,7 @@ function runPs(lines: string[]): string {
     fs.writeFileSync(tmp, lines.join('\r\n'), 'utf-8');
     return cp.execSync(
       `powershell -NoProfile -ExecutionPolicy Bypass -File "${tmp}"`,
-      { timeout: 30000 },
+      { timeout: 30000, windowsHide: true },
     ).toString().trim();
   } catch {
     return '';
@@ -147,28 +186,47 @@ function runPs(lines: string[]): string {
   }
 }
 
-export function openFileDialog(defaultPath: string): string | null {
+export async function openFileDialog(defaultPath: string): Promise<string | null> {
   ensureDir(defaultPath);
+
+  if (isInCEP()) {
+    // A well-formed reply means the dialog ran; `path: null` is a cancel and
+    // must not fall through to a second dialog.
+    const r = await callHost<{ ok: boolean; path?: string | null }>(
+      'smoothio_openPresetDialog', defaultPath,
+    ).catch(() => null);
+    if (r && r.ok) return r.path ?? null;
+  }
+
   const result = runPs([
     'Add-Type -AssemblyName System.Windows.Forms',
     '$d = New-Object System.Windows.Forms.OpenFileDialog',
-    `$d.InitialDirectory = "${defaultPath.replace(/\\/g, '\\\\')}"`,
-    '$d.Filter = "JSON Files (*.json)|*.json"',
-    '$d.Title = "Import Smoothio Presets"',
+    `$d.InitialDirectory = ${psQuote(defaultPath)}`,
+    "$d.Filter = 'JSON Files (*.json)|*.json'",
+    "$d.Title = 'Import Smoothio Presets'",
     'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }',
     'else { Write-Output "" }',
   ]);
   return result || null;
 }
 
-export function openSaveDialog(defaultDir: string, defaultName: string): string | null {
+export async function openSaveDialog(defaultDir: string, defaultName: string): Promise<string | null> {
+  ensureDir(defaultDir);
+
+  if (isInCEP()) {
+    const r = await callHost<{ ok: boolean; path?: string | null }>(
+      'smoothio_savePresetDialog', defaultDir, defaultName,
+    ).catch(() => null);
+    if (r && r.ok) return r.path ?? null;
+  }
+
   const result = runPs([
     'Add-Type -AssemblyName System.Windows.Forms',
     '$d = New-Object System.Windows.Forms.SaveFileDialog',
-    `$d.InitialDirectory = "${defaultDir.replace(/\\/g, '\\\\')}"`,
-    `$d.FileName = "${defaultName}"`,
-    '$d.Filter = "JSON Files (*.json)|*.json"',
-    '$d.Title = "Export Smoothio Presets"',
+    `$d.InitialDirectory = ${psQuote(defaultDir)}`,
+    `$d.FileName = ${psQuote(defaultName)}`,
+    "$d.Filter = 'JSON Files (*.json)|*.json'",
+    "$d.Title = 'Export Smoothio Presets'",
     '$d.OverwritePrompt = $true',
     'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }',
     'else { Write-Output "" }',
@@ -178,25 +236,46 @@ export function openSaveDialog(defaultDir: string, defaultName: string): string 
 
 // ── Merge helpers ─────────────────────────────────────────────────────────────
 
+export function newPresetId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+/**
+ * Re-id any preset whose id already appeared earlier in the list. Presets are
+ * matched by *name* when merging, so two same-named entries — or an imported
+ * file that already carries duplicate ids — would otherwise end up sharing an
+ * id, which collides as a React key and makes drag-reorder target the wrong card.
+ */
+function withUniqueIds(list: Preset[]): Preset[] {
+  const seen = new Set<string>();
+  return list.map(p => {
+    if (p.id && !seen.has(p.id)) { seen.add(p.id); return p; }
+    let id = newPresetId();
+    while (seen.has(id)) id = newPresetId();
+    seen.add(id);
+    return { ...p, id };
+  });
+}
+
 export function mergePresets(
   existing: Preset[],
   incoming: Preset[],
   mode: ImportMode,
 ): Preset[] {
   if (mode === 'overwriteAll') {
-    return incoming.map((p, i) => ({ ...p, order: i }));
+    return withUniqueIds(incoming.map((p, i) => ({ ...p, order: i })));
   }
   if (mode === 'skip') {
     const names = new Set(existing.map(p => p.name));
     const toAdd = incoming.filter(p => !names.has(p.name));
-    return [...existing, ...toAdd].map((p, i) => ({ ...p, order: i }));
+    return withUniqueIds([...existing, ...toAdd].map((p, i) => ({ ...p, order: i })));
   }
   // overwrite: replace same-name, append new
   const byName = new Map(incoming.map(p => [p.name, p]));
   const merged = existing.map(p => byName.has(p.name) ? { ...byName.get(p.name)!, order: p.order } : p);
   const existingNames = new Set(existing.map(p => p.name));
   const toAdd = incoming.filter(p => !existingNames.has(p.name));
-  return [...merged, ...toAdd].map((p, i) => ({ ...p, order: i }));
+  return withUniqueIds([...merged, ...toAdd].map((p, i) => ({ ...p, order: i })));
 }
 
 /** Extract just the filename (without extension) from a full path. */

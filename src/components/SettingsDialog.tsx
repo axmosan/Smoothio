@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AppSettings, UILayout } from '../types';
 
 const LAYOUT_OPTIONS: { value: UILayout; label: string }[] = [
@@ -29,6 +29,21 @@ export const SettingsDialog: React.FC<Props> = ({
     onSave(local);
     onClose();
   };
+
+  // Esc closes the dialog. It commits like the Close button does — this dialog
+  // has no discard path, so dismissing must not silently drop the edits. While
+  // the delete confirmation is up, Esc backs out of that first.
+  const saveRef = useRef(handleSave);
+  saveRef.current = handleSave;
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (confirmDelete) setConfirmDelete(false);
+      else saveRef.current();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [confirmDelete]);
 
   return (
     <div style={overlay}>

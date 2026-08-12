@@ -486,6 +486,34 @@ function smoothio_resetEase() {
   }
 }
 
+// ─── File dialogs ─────────────────────────────────────────────────────────────
+// Run here rather than in the panel so the user gets the standard Explorer
+// dialog, with no child process to launch. `initialPath` seeds the folder the
+// dialog opens in; a null path back means the user cancelled.
+
+function smoothio_openPresetDialog(initialPath) {
+  try {
+    var dir = String(initialPath || Folder.myDocuments.fsName);
+    var start = new File(dir + '/Smoothio_Presets.json');
+    var r = start.openDlg('Import Smoothio Presets', 'JSON files:*.json', false);
+    return JSON.stringify({ ok: true, path: r ? r.fsName : null });
+  } catch (e) {
+    return err(e);
+  }
+}
+
+function smoothio_savePresetDialog(initialPath, defaultName) {
+  try {
+    var dir  = String(initialPath || Folder.myDocuments.fsName);
+    var name = String(defaultName || 'Smoothio_Presets.json');
+    var start = new File(dir + '/' + name);
+    var r = start.saveDlg('Export Smoothio Presets', 'JSON files:*.json');
+    return JSON.stringify({ ok: true, path: r ? r.fsName : null });
+  } catch (e) {
+    return err(e);
+  }
+}
+
 function smoothio_importEase() {
   var comp = getComp();
   if (!comp) return err('No active composition');

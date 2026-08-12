@@ -162,6 +162,17 @@ export function buildSvgPath(
   return d;
 }
 
+/**
+ * Deep copy of a curve. Written out by hand rather than via JSON round-tripping:
+ * this runs on every mouse move while a handle is dragged, and the shape is
+ * fixed and small, so the explicit version is both faster and allocation-light.
+ */
 export function cloneCurve(curve: CurveData): CurveData {
-  return JSON.parse(JSON.stringify(curve));
+  return {
+    midPoints: curve.midPoints.map(p => ({ x: p.x, y: p.y })),
+    handles: curve.handles.map(h => ({
+      out: { x: h.out.x, y: h.out.y },
+      in:  { x: h.in.x,  y: h.in.y  },
+    })),
+  };
 }

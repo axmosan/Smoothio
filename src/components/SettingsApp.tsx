@@ -34,6 +34,19 @@ export const SettingsApp: React.FC = () => {
 
   useEffect(() => () => { if (writeTimer.current !== null) window.clearTimeout(writeTimer.current); }, []);
 
+  // Esc closes the window, matching the Close button. Settings are already
+  // persisted on change, so nothing is lost. While the delete confirmation is
+  // up, Esc backs out of that first.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (confirmDelete) { setConfirmDelete(false); return; }
+      try { window.close(); } catch { /**/ }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [confirmDelete]);
+
   const sendDeleteAll = () => {
     writeSettingsFile(local, 'deleteAllPresets');
     setConfirmDelete(false);

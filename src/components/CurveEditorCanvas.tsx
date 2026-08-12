@@ -2,11 +2,12 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 import { CurveData, DragState, DragTarget, Point } from '../types';
-import { buildSvgPath, getAnchorPoints } from '../utils/curveUtils';
+import { buildSvgPath, cloneCurve, getAnchorPoints } from '../utils/curveUtils';
 
 interface Props {
   curve: CurveData;
@@ -57,6 +58,13 @@ export const CurveEditorCanvas: React.FC<Props> = ({
   const [drag, setDrag] = useState<DragState | null>(null);
   const scaleRef = useRef(1);
   const dragScaleRef = useRef<number | null>(null);
+
+  // Latest curve / onChange for the drag listeners, so that moving a handle
+  // doesn't tear down and re-register window listeners on every mouse move.
+  const curveRef = useRef(curve);
+  curveRef.current = curve;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
 
   // Animated viewY — Y range computed from handle positions
   const viewYRef = useRef(computeTargetViewY(curve));
@@ -203,7 +211,7 @@ export const CurveEditorCanvas: React.FC<Props> = ({
     const nearest = findNearestHandle(svgPos);
     if (!nearest || nearest.type === 'midpoint') return;
     const cursorNorm = clampHandleX(curve, nearest.segIndex, fromSvg(svgPos));
-    const next = JSON.parse(JSON.stringify(curve)) as CurveData;
+    const next = cloneCurve(curve);
     if (nearest.type === 'handleOut') next.handles[nearest.segIndex].out = cursorNorm;
     else if (nearest.type === 'handleIn') next.handles[nearest.segIndex].in = cursorNorm;
     onChange(next);
@@ -221,22 +229,21 @@ export const CurveEditorCanvas: React.FC<Props> = ({
       const dy = -(svgPos.y - drag.startSvgPos.y) / s;
       const newVal: Point = { x: drag.startValue.x + dx, y: drag.startValue.y + dy };
 
-      const next = JSON.parse(JSON.stringify(curve)) as CurveData;
+      const next = cloneCurve(curveRef.current);
       const { target } = drag;
       if (target.type === 'midpoint')    next.midPoints[target.index]         = newVal;
       else if (target.type === 'handleOut') next.handles[target.segIndex].out = clampHandleX(next, target.segIndex, newVal);
       else                                  next.handles[target.segIndex].in  = clampHandleX(next, target.segIndex, newVal);
-      onChange(next);
+      onChangeRef.current(next);
     };
     const onUp = () => { setDrag(null); dragScaleRef.current = null; };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-  }, [drag, curve, onChange]);
+  }, [drag]);
 
   // ── Grid ──────────────────────────────────────────────────────────────────
   const gridStep = 1 / gridDivisions; // 0.2 for 5 divisions
-  const gridLines: React.ReactElement[] = [];
 
   // Grid color constants:
   // - dim (standard, every gridStep)  : rgba(255,255,255,0.07)
@@ -245,33 +252,41 @@ export const CurveEditorCanvas: React.FC<Props> = ({
   const STROKE_DIM = 'rgba(255,255,255,0.07)';
   const STROKE_MID = 'rgba(255,255,255,0.22)';
 
-  const viewXMax = viewXMin + viewXRange;
-  const iXStart  = Math.floor(viewXMin / gridStep) - 1;
-  const iXEnd    = Math.ceil(viewXMax  / gridStep) + 1;
-  for (let i = iXStart; i <= iXEnd; i++) {
-    const t = i * gridStep;
-    if (Math.abs(t) < 0.001) continue; // x=0 → white, rendered separately
-    const svgX = toSvg({ x: t, y: 0 }).x;
-    const isInt = Math.abs(t - Math.round(t)) < 0.001;
-    gridLines.push(
-      <line key={`v${i}`} x1={svgX} y1={PADDING} x2={svgX} y2={h - PADDING}
-        stroke={isInt ? STROKE_MID : STROKE_DIM} strokeWidth={1} />
-    );
-  }
+  // Only the view transform can move these ~60 lines, so they are rebuilt when
+  // it changes rather than on every render (dragging a handle re-renders this
+  // component on each mouse move without touching the grid).
+  const gridLines = useMemo(() => {
+    const lines: React.ReactElement[] = [];
 
-  const viewYMax = viewYMin + viewYDisp;
-  const iYStart  = Math.floor(viewYMin / gridStep) - 1;
-  const iYEnd    = Math.ceil(viewYMax  / gridStep) + 1;
-  for (let i = iYStart; i <= iYEnd; i++) {
-    const t = i * gridStep;
-    if (Math.abs(t) < 0.001) continue; // y=0 → white, rendered separately
-    const svgY = toSvg({ x: 0, y: t }).y;
-    const isInt = Math.abs(t - Math.round(t)) < 0.001;
-    gridLines.push(
-      <line key={`h${i}`} x1={PADDING} y1={svgY} x2={w - PADDING} y2={svgY}
-        stroke={isInt ? STROKE_MID : STROKE_DIM} strokeWidth={1} />
-    );
-  }
+    const viewXMax = viewXMin + viewXRange;
+    const iXStart  = Math.floor(viewXMin / gridStep) - 1;
+    const iXEnd    = Math.ceil(viewXMax  / gridStep) + 1;
+    for (let i = iXStart; i <= iXEnd; i++) {
+      const t = i * gridStep;
+      if (Math.abs(t) < 0.001) continue; // x=0 → white, rendered separately
+      const svgX = toSvg({ x: t, y: 0 }).x;
+      const isInt = Math.abs(t - Math.round(t)) < 0.001;
+      lines.push(
+        <line key={`v${i}`} x1={svgX} y1={PADDING} x2={svgX} y2={h - PADDING}
+          stroke={isInt ? STROKE_MID : STROKE_DIM} strokeWidth={1} />
+      );
+    }
+
+    const viewYMax = viewYMin + viewYDisp;
+    const iYStart  = Math.floor(viewYMin / gridStep) - 1;
+    const iYEnd    = Math.ceil(viewYMax  / gridStep) + 1;
+    for (let i = iYStart; i <= iYEnd; i++) {
+      const t = i * gridStep;
+      if (Math.abs(t) < 0.001) continue; // y=0 → white, rendered separately
+      const svgY = toSvg({ x: 0, y: t }).y;
+      const isInt = Math.abs(t - Math.round(t)) < 0.001;
+      lines.push(
+        <line key={`h${i}`} x1={PADDING} y1={svgY} x2={w - PADDING} y2={svgY}
+          stroke={isInt ? STROKE_MID : STROKE_DIM} strokeWidth={1} />
+      );
+    }
+    return lines;
+  }, [toSvg, gridStep, w, h, viewXMin, viewXRange, viewYMin, viewYDisp]);
 
   // Main ease lines: x=0 (left edge) and y=0 (bottom edge) — white only
   const ax0 = toSvg({ x: 0, y: 0 }).x;

@@ -24,10 +24,12 @@ import {
   loadPresetsFromCanonical,
   loadPresetsFromFile,
   mergePresets,
+  newPresetId,
   openFileDialog,
   openSaveDialog,
   readSettingsFile,
   savePresetsToFile,
+  watchSettingsFile,
   writeSettingsFile,
 } from './utils/fileUtils';
 
@@ -94,13 +96,23 @@ export const App: React.FC = () => {
     autoSaveToCanonical(presets);
   }, [presets]);
 
+  // Sync to popout via localStorage (storage event fires only in other windows).
+  // localStorage writes are synchronous, and this runs on every mouse move while
+  // the curve is dragged — so skip it entirely when no popout is listening. The
+  // popout is seeded with the current curve in handleOpenPopout, so it still
+  // opens with the right values.
+  const syncCurveToPopout = useCallback((c: CurveData) => {
+    const w = popoutRef.current;
+    if (!w || w.closed) return;
+    localStorage.setItem(STORAGE_CURVE_SYNC, JSON.stringify({ curve: c, ts: Date.now() }));
+  }, []);
+
   const setCurve = useCallback((c: CurveData) => {
     setCurveRaw(c);
     setText1(curveToTextBox1(c));
     setText2(curveToTextBox2(c));
-    // Sync to popout via localStorage (storage event fires only in other windows)
-    localStorage.setItem(STORAGE_CURVE_SYNC, JSON.stringify({ curve: c, ts: Date.now() }));
-  }, []);
+    syncCurveToPopout(c);
+  }, [syncCurveToPopout]);
 
   // Listen for curve changes FROM the popout window
   useEffect(() => {
@@ -125,12 +137,12 @@ export const App: React.FC = () => {
   const onText1Change = (val: string) => {
     setText1(val);
     const p = textBoxesToCurve(val, text2);
-    if (p) { setCurveRaw(p); localStorage.setItem(STORAGE_CURVE_SYNC, JSON.stringify({ curve: p, ts: Date.now() })); }
+    if (p) { setCurveRaw(p); syncCurveToPopout(p); }
   };
   const onText2Change = (val: string) => {
     setText2(val);
     const p = textBoxesToCurve(text1, val);
-    if (p) { setCurveRaw(p); localStorage.setItem(STORAGE_CURVE_SYNC, JSON.stringify({ curve: p, ts: Date.now() })); }
+    if (p) { setCurveRaw(p); syncCurveToPopout(p); }
   };
 
   const showStatus = (msg: string) => { setStatus(msg); setTimeout(() => setStatus(''), 3000); };
@@ -172,7 +184,7 @@ export const App: React.FC = () => {
 
   const handleSavePreset = (name: string) => {
     const p: Preset = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+      id: newPresetId(),
       name, curve: cloneCurve(curve), createdAt: Date.now(), order: presets.length,
     };
     setPresets(prev => [...prev, p]);
@@ -186,8 +198,8 @@ export const App: React.FC = () => {
   const handleLoadPreset = (preset: Preset) => { setCurve(cloneCurve(preset.curve)); };
 
   // ── Export ────────────────────────────────────────────────────────────────
-  const handleExport = () => {
-    const savedPath = openSaveDialog(settings.presetSaveLocation, 'Smoothio_Presets.json');
+  const handleExport = async () => {
+    const savedPath = await openSaveDialog(settings.presetSaveLocation, 'Smoothio_Presets.json');
     if (!savedPath) return;
     const res = savePresetsToFile(presets, savedPath);
     const filename = savedPath.split(/[\\/]/).pop() ?? savedPath;
@@ -195,8 +207,8 @@ export const App: React.FC = () => {
   };
 
   // ── Import (two-step: file dialog → mode dialog → merge) ────────────────
-  const handleImportFile = () => {
-    const filePath = openFileDialog(settings.presetSaveLocation);
+  const handleImportFile = async () => {
+    const filePath = await openFileDialog(settings.presetSaveLocation);
     if (!filePath) return;
     const res = loadPresetsFromFile(filePath);
     if (!res.ok || !res.data) {
@@ -233,13 +245,18 @@ export const App: React.FC = () => {
     setShowSettings(true);
   };
 
-  // Poll the shared settings file for changes made by the Settings window.
+  // Pick up changes the Settings window makes to the shared settings file.
+  // Driven by a filesystem watch (idle cost ~0, and changes land immediately);
+  // the old 1.5s poll stays as the fallback when watching isn't available.
   useEffect(() => {
     if (!isInCEP()) return;
     lastSettingsTsRef.current = readSettingsFile()?.ts ?? 0; // baseline: only react to future writes
-    const id = window.setInterval(() => {
+
+    /** Returns false if the file could not be read at all (retry worthwhile). */
+    const applyIfChanged = (): boolean => {
       const f = readSettingsFile();
-      if (!f || f.ts === lastSettingsTsRef.current) return;
+      if (!f) return false;
+      if (f.ts === lastSettingsTsRef.current) return true; // our own write, or no change
       lastSettingsTsRef.current = f.ts;
       const merged = { ...DEFAULT_SETTINGS, ...f.settings };
       setSettings(merged);
@@ -249,8 +266,29 @@ export const App: React.FC = () => {
         // Clear the command so it runs once; record the new ts to ignore our own write.
         lastSettingsTsRef.current = writeSettingsFile(f.settings, null);
       }
-    }, 1500);
-    return () => window.clearInterval(id);
+      return true;
+    };
+
+    let debounce: number | null = null;
+    let retry: number | null = null;
+    const onFileEvent = () => {
+      // A single save can raise several events; coalesce them.
+      if (debounce !== null) window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => {
+        debounce = null;
+        if (!applyIfChanged()) retry = window.setTimeout(applyIfChanged, 250);
+      }, 60);
+    };
+
+    const stopWatch = watchSettingsFile(onFileEvent);
+    const pollId = stopWatch ? null : window.setInterval(applyIfChanged, 1500);
+
+    return () => {
+      if (debounce !== null) window.clearTimeout(debounce);
+      if (retry !== null) window.clearTimeout(retry);
+      if (stopWatch) stopWatch();
+      if (pollId !== null) window.clearInterval(pollId);
+    };
   }, []);
 
   const handleReorderPresets = useCallback((reordered: Preset[]) => {
@@ -428,6 +466,7 @@ export const App: React.FC = () => {
       {pendingImport && (
         <ImportDialog
           fileName={pendingImport.originalName}
+          presetCount={pendingImport.data.presets.length}
           onImport={handleImportConfirm}
           onCancel={handleImportCancel}
         />

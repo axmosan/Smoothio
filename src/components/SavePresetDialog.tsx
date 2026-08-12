@@ -16,6 +16,13 @@ export const SavePresetDialog: React.FC<Props> = ({ curve, onSave, onCancel }) =
     inputRef.current?.select();
   }, []);
 
+  // Esc dismisses the dialog even when the name field isn't focused.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel(); };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onCancel]);
+
   const w = 200;
   const h = 180;
   const pad = 12;
@@ -95,7 +102,10 @@ export const SavePresetDialog: React.FC<Props> = ({ curve, onSave, onCancel }) =
 
         {/* Buttons */}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button onClick={onCancel} style={{ ...dialogBtn, background: '#cc2222' }}>
+          <button
+            onClick={onCancel}
+            style={{ ...dialogBtn, background: '#2a2a2a', border: '1px solid #333', color: '#ccc' }}
+          >
             Cancel
           </button>
           <button onClick={submit} style={{ ...dialogBtn, background: '#0077ff' }}>

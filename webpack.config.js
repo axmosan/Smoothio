@@ -18,6 +18,16 @@ module.exports = (env, argv) => {
     },
     resolve: {
       extensions: ['.tsx', '.ts', '.js'],
+      // CEP opens every <Extension> in its own CEF process and loads over file://
+      // (no gzip), so the raw bundle size is paid again for each window. Preact's
+      // React-compatible layer keeps the component code unchanged and cuts the
+      // runtime from ~140KB to ~10KB per bundle.
+      alias: {
+        react: 'preact/compat',
+        'react-dom/client': 'preact/compat/client',
+        'react-dom': 'preact/compat',
+        'react/jsx-runtime': 'preact/jsx-runtime',
+      },
     },
     module: {
       rules: [
