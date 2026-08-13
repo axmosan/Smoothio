@@ -1,6 +1,5 @@
 node_modules/
 dist/
-icons/
 .DS_Store
 .claude/
 *.log

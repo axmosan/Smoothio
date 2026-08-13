@@ -1,7 +1,6 @@
 const path = require('path');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
-const CopyPlugin = require('copy-webpack-plugin');
 
 module.exports = (env, argv) => {
   const isDev = argv && argv.mode === 'development';
@@ -56,7 +55,6 @@ module.exports = (env, argv) => {
         inject: 'body',
       }),
       new MiniCssExtractPlugin({ filename: 'dist/styles.css' }),
-      new CopyPlugin({ patterns: [{ from: 'SVG', to: 'icons' }] }),
     ],
     externals: {
       fs: 'commonjs fs',
